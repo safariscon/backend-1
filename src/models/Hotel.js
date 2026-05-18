@@ -111,4 +111,17 @@ const hotelSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+hotelSchema.index({ location: 1, type: 1, createdAt: -1 });
+hotelSchema.index({ basePrice: 1, createdAt: -1 });
+
+hotelSchema.pre("validate", function rejectInlineImages() {
+  const inlineImage = (this.images || []).find((image) =>
+    /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(String(image || ""))
+  );
+
+  if (inlineImage) {
+    throw new Error("Inline base64 images are not allowed. Upload to Cloudinary and save the URL only.");
+  }
+});
+
 module.exports = mongoose.model("Hotel", hotelSchema);

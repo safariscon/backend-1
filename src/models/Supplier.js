@@ -208,4 +208,17 @@ const supplierSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+supplierSchema.index({ verificationStatus: 1, category: 1, createdAt: -1 });
+
+supplierSchema.pre("validate", function rejectInlineProfileImages() {
+  const values = [this.profile?.logo, this.profile?.coverImage];
+  const inlineImage = values.find((image) =>
+    /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(String(image || ""))
+  );
+
+  if (inlineImage) {
+    throw new Error("Inline base64 profile images are not allowed. Upload to Cloudinary and save the URL only.");
+  }
+});
+
 module.exports = mongoose.model("Supplier", supplierSchema);

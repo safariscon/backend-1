@@ -120,4 +120,7 @@ const hotelServiceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+hotelServiceSchema.index({ isActive: 1, category: 1, name: 1 });
+hotelServiceSchema.index({ hotelId: 1, isActive: 1, category: 1 });
+
 module.exports = mongoose.model("HotelService", hotelServiceSchema);

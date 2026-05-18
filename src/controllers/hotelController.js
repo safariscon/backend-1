@@ -3,6 +3,12 @@ const Hotel = require("../models/Hotel");
 const HotelService = require("../models/HotelService");
 const Room = require("../models/Room");
 const {
+  REALTIME_EVENTS,
+  emitHotelRealtime,
+  emitRealtime,
+  emitUserRealtime,
+} = require("../utils/realtime");
+const {
   normalizeAvailabilityCalendar,
   normalizeCapacity,
   normalizePriceModel,
@@ -120,6 +126,14 @@ const createRoom = async (req, res) => {
       status: status || "available",
     });
 
+    emitHotelRealtime(hotelId, REALTIME_EVENTS.ROOM_CHANGED, {
+      action: "created",
+      roomId: room._id,
+      hotelId,
+      status: room.status,
+    });
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "room-created", hotelId });
+
     return res.status(201).json({ message: "Room created successfully.", room });
   } catch (error) {
     return res.status(500).json({
@@ -165,6 +179,14 @@ const updateRoom = async (req, res) => {
 
     await room.save();
 
+    emitHotelRealtime(hotelId, REALTIME_EVENTS.ROOM_CHANGED, {
+      action: "updated",
+      roomId: room._id,
+      hotelId,
+      status: room.status,
+    });
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "room-updated", hotelId });
+
     return res.json({ message: "Room updated successfully.", room });
   } catch (error) {
     return res.status(500).json({
@@ -200,6 +222,18 @@ const deleteRoom = async (req, res) => {
     );
 
     await Room.deleteOne({ _id: room._id });
+
+    emitHotelRealtime(hotelId, REALTIME_EVENTS.ROOM_CHANGED, {
+      action: "deleted",
+      roomId: room._id,
+      hotelId,
+    });
+    emitRealtime(REALTIME_EVENTS.BOOKING_CHANGED, {
+      action: "room-deleted",
+      hotelId,
+      roomId: room._id,
+    });
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "room-deleted", hotelId });
 
     return res.json({ message: "Room deleted successfully." });
   } catch (error) {
@@ -250,6 +284,26 @@ const updateBookingStatus = async (req, res) => {
 
     booking.status = status;
     await booking.save();
+
+    if (status === "cancelled" && booking.roomId) {
+      await Room.updateOne(
+        { _id: booking.roomId, hotelId },
+        { $set: { status: "available" } }
+      );
+      emitHotelRealtime(hotelId, REALTIME_EVENTS.ROOM_CHANGED, {
+        action: "released",
+        roomId: booking.roomId,
+        hotelId,
+        status: "available",
+      });
+    }
+
+    emitUserRealtime(booking.touristId, REALTIME_EVENTS.BOOKING_CHANGED, {
+      action: "status-updated",
+      bookingId: booking._id,
+      hotelId,
+      status: booking.status,
+    });
 
     return res.json({
       message: "Booking status updated successfully.",
@@ -305,6 +359,15 @@ const upsertMyService = async (req, res) => {
       return res.status(404).json({ message: "Service not found." });
     }
 
+    emitHotelRealtime(hotelId, REALTIME_EVENTS.SERVICE_CHANGED, {
+      action: serviceId ? "updated" : "created",
+      serviceId: service._id,
+      hotelId,
+      isActive: service.isActive,
+      inventory: service.availabilitySchedule?.inventory,
+    });
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "service-saved", hotelId });
+
     return res.json({
       message: serviceId
         ? "Service updated successfully."
@@ -330,6 +393,13 @@ const deleteService = async (req, res) => {
     if (!deleted) {
       return res.status(404).json({ message: "Service not found." });
     }
+
+    emitHotelRealtime(hotelId, REALTIME_EVENTS.SERVICE_CHANGED, {
+      action: "deleted",
+      serviceId: deleted._id,
+      hotelId,
+    });
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "service-deleted", hotelId });
 
     return res.json({ message: "Service deleted successfully." });
   } catch (error) {

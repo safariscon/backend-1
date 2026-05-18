@@ -10,6 +10,12 @@ const {
   normalizePriceModel,
   normalizeServiceSchedule,
 } = require("../services/marketplaceService");
+const {
+  REALTIME_EVENTS,
+  emitHotelRealtime,
+  emitRealtime,
+  emitUserRealtime,
+} = require("../utils/realtime");
 
 const getMarketplaceOverview = async (_req, res) => {
   try {
@@ -63,6 +69,7 @@ const createSupplier = async (req, res) => {
       return res.status(400).json({ message: "Supplier name is required." });
     }
     const supplier = await Supplier.create(payload);
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "supplier-created" });
     return res.status(201).json({ message: "Supplier created successfully.", supplier });
   } catch (error) {
     return res.status(500).json({
@@ -83,6 +90,12 @@ const updateSupplierVerification = async (req, res) => {
 
     supplier.verificationStatus = verificationStatus || supplier.verificationStatus;
     await supplier.save();
+
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, {
+      reason: "supplier-verification-updated",
+      supplierId: supplier._id,
+      verificationStatus: supplier.verificationStatus,
+    });
 
     return res.json({
       message: "Supplier verification updated successfully.",
@@ -160,6 +173,15 @@ const upsertHotelServiceByAdmin = async (req, res) => {
       return res.status(404).json({ message: "Service not found." });
     }
 
+    emitHotelRealtime(service.hotelId, REALTIME_EVENTS.SERVICE_CHANGED, {
+      action: serviceId ? "updated" : "created",
+      serviceId: service._id,
+      hotelId: service.hotelId,
+      isActive: service.isActive,
+      inventory: service.availabilitySchedule?.inventory,
+    });
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "admin-service-saved" });
+
     return res.json({
       message: serviceId
         ? "Hotel service updated successfully."
@@ -196,6 +218,12 @@ const upgradeHotelMarketplaceProfile = async (req, res) => {
 
     await hotel.save();
 
+    emitRealtime(REALTIME_EVENTS.HOTEL_CHANGED, {
+      action: "updated",
+      hotelId: hotel._id,
+    });
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "hotel-profile-updated" });
+
     return res.json({
       message: "Hotel marketplace profile updated successfully.",
       hotel,
@@ -229,6 +257,43 @@ const createCompositeBooking = async (req, res) => {
       });
     }
 
+    const serviceItems = items.filter((item) => item.serviceId);
+    const claimedServices = [];
+
+    for (const item of serviceItems) {
+      const quantity = Math.max(1, Number(item.quantity) || 1);
+      const updatedService = await HotelService.findOneAndUpdate(
+        {
+          _id: item.serviceId,
+          isActive: true,
+          "availabilitySchedule.inventory": { $gte: quantity },
+        },
+        { $inc: { "availabilitySchedule.inventory": -quantity } },
+        { new: true, runValidators: true }
+      );
+
+      if (!updatedService) {
+        for (const claimed of claimedServices) {
+          await HotelService.updateOne(
+            { _id: claimed.serviceId },
+            { $inc: { "availabilitySchedule.inventory": claimed.quantity } }
+          );
+        }
+
+        return res.status(409).json({
+          message: "One or more selected services are no longer available.",
+          unavailableServiceId: item.serviceId,
+        });
+      }
+
+      claimedServices.push({
+        serviceId: updatedService._id,
+        hotelId: updatedService.hotelId,
+        quantity,
+        inventory: updatedService.availabilitySchedule?.inventory,
+      });
+    }
+
     const booking = await Booking.create({
       touristId,
       destinationPlace: String(destinationPlace).trim(),
@@ -253,6 +318,21 @@ const createCompositeBooking = async (req, res) => {
       adminResponseMessage:
         "Marketplace booking created. Availability lock and supplier confirmation pending.",
     });
+
+    for (const claimed of claimedServices) {
+      emitHotelRealtime(claimed.hotelId, REALTIME_EVENTS.SERVICE_CHANGED, {
+        action: "reserved",
+        serviceId: claimed.serviceId,
+        hotelId: claimed.hotelId,
+        inventory: claimed.inventory,
+      });
+    }
+    emitUserRealtime(touristId, REALTIME_EVENTS.BOOKING_CHANGED, {
+      action: "created",
+      bookingId: booking._id,
+      status: booking.status,
+    });
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "marketplace-booking-created" });
 
     return res.status(201).json({
       message: "Composite booking created successfully.",

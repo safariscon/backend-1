@@ -5,6 +5,7 @@ const Room = require("../models/Room");
 const Supplier = require("../models/Supplier");
 const { generateToken, buildUserPayload } = require("../utils/auth");
 const { sendHotelCredentialsEmail } = require("../utils/notify");
+const { REALTIME_EVENTS, emitRealtime } = require("../utils/realtime");
 
 const BUSINESS_TYPE_CONFIG = {
   hotel: {
@@ -467,6 +468,13 @@ const registerHotelByAdmin = async (req, res) => {
         status: "available",
       });
     }
+
+    emitRealtime(REALTIME_EVENTS.HOTEL_CHANGED, {
+      action: "created",
+      hotelId: hotel._id,
+      supplierId: supplier._id,
+    });
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "business-registered" });
 
     return res.status(201).json({
       hotel,

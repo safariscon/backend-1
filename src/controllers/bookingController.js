@@ -1,5 +1,6 @@
 const Booking = require("../models/Booking");
 const Hotel = require("../models/Hotel");
+const { REALTIME_EVENTS, emitUserRealtime } = require("../utils/realtime");
 
 const createBookingRequest = async (req, res) => {
   try {
@@ -41,6 +42,14 @@ const createBookingRequest = async (req, res) => {
       isConnected: false,
       adminResponseMessage:
         "Your request has been submitted successfully. Please wait for admin response.",
+    });
+
+    emitUserRealtime(req.user._id, REALTIME_EVENTS.BOOKING_CHANGED, {
+      action: "created",
+      bookingId: booking._id,
+      touristId: req.user._id,
+      hotelId: preferredHotelId,
+      status: booking.status,
     });
 
     return res.status(201).json({

@@ -199,4 +199,9 @@ const bookingSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+bookingSchema.index({ status: 1, createdAt: -1 });
+bookingSchema.index({ hotelId: 1, status: 1, createdAt: -1 });
+bookingSchema.index({ touristId: 1, createdAt: -1 });
+bookingSchema.index({ "items.serviceId": 1, status: 1 });
+
 module.exports = mongoose.model("Booking", bookingSchema);

@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
+    "migrate:images": "node src/utils/migrateImagesToCloudinary.js",
+    "verify:images": "node src/utils/verifyImageStorage.js",
     "test": "echo \"No tests configured\""
   },
   "keywords": [],
@@ -21,7 +23,8 @@
     "jsonwebtoken": "^9.0.3",
     "mongodb": "^7.1.1",
     "mongoose": "^9.4.1",
-    "multer": "^2.1.1"
+    "multer": "^2.1.1",
+    "socket.io": "^4.8.3"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

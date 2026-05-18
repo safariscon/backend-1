@@ -2,7 +2,7 @@ const bcrypt = require("bcrypt");
 const User = require("../models/User");
 
 const seedAdmin = async () => {
-  const adminEmail = (process.env.ADMIN_EMAIL || "admin@tourconnect.com")
+  const adminEmail = (process.env.ADMIN_EMAIL || "admin@safarisconn.com")
     .toLowerCase()
     .trim();
   const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
@@ -11,7 +11,7 @@ const seedAdmin = async () => {
   const hashedPassword = await bcrypt.hash(adminPassword, 10);
   if (!existing) {
     await User.create({
-      name: "TourConnect Admin",
+      name: "SafariConnect Admin",
       email: adminEmail,
       password: hashedPassword,
       role: "admin",
@@ -23,19 +23,19 @@ const seedAdmin = async () => {
   const helperSeed = [
     {
       name: "Eric Guide",
-      email: "eric.helper@tourconnect.com",
+      email: "eric.helper@safarisconn.com",
       phone: "0780000001",
       role: "tourHelper",
     },
     {
       name: "Diane Helper",
-      email: "diane.helper@tourconnect.com",
+      email: "diane.helper@safarisconn.com",
       phone: "0790000002",
       role: "tourHelper",
     },
     {
       name: "John Support",
-      email: "john.helper@tourconnect.com",
+      email: "john.helper@safarisconn.com",
       phone: "0720000003",
       role: "tourHelper",
     },

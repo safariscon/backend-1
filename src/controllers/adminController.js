@@ -3,6 +3,12 @@ const Hotel = require("../models/Hotel");
 const Room = require("../models/Room");
 const User = require("../models/User");
 const { registerHotelByAdmin } = require("./authController");
+const {
+  REALTIME_EVENTS,
+  emitHotelRealtime,
+  emitRealtime,
+  emitUserRealtime,
+} = require("../utils/realtime");
 
 const registerHotel = registerHotelByAdmin;
 const registerBusiness = registerHotelByAdmin;
@@ -211,23 +217,69 @@ const connectTour = async (req, res) => {
       });
     }
 
-    booking.hotelId = hotel._id;
-    booking.roomId = room._id;
-    booking.tourHelpers = helpers.map((helper) => helper._id);
-    booking.status = "confirmed";
-    booking.isConnected = true;
-    booking.isAcknowledgedByAdmin = true;
-    booking.acknowledgedAt = booking.acknowledgedAt || new Date();
-    booking.totalPrice = booking.totalPrice || room.price;
-    booking.adminResponseMessage = `Assigned to ${hotel.name} in ${hotel.location}.${helpers.length > 0 ? ` Tour helpers: ${helpers.map((helper) => `${helper.name} - ${helper.phone || helper.email}`).join(", ")}.` : ""}`;
+    const claimedRoom = await Room.findOneAndUpdate(
+      { _id: roomId, hotelId: hotel._id, status: "available" },
+      { $set: { status: "occupied" } },
+      { new: true, runValidators: true }
+    );
 
-    room.status = "occupied";
+    if (!claimedRoom) {
+      return res.status(409).json({
+        message: "Room was just booked by another request. Please select another available room.",
+      });
+    }
 
-    await Promise.all([booking.save(), room.save()]);
+    const adminResponseMessage = `Assigned to ${hotel.name} in ${hotel.location}.${helpers.length > 0 ? ` Tour helpers: ${helpers.map((helper) => `${helper.name} - ${helper.phone || helper.email}`).join(", ")}.` : ""}`;
+    const connectedBooking = await Booking.findOneAndUpdate(
+      {
+        _id: bookingId,
+        isConnected: { $ne: true },
+        status: { $ne: "confirmed" },
+      },
+      {
+        $set: {
+          hotelId: hotel._id,
+          roomId: claimedRoom._id,
+          tourHelpers: helpers.map((helper) => helper._id),
+          status: "confirmed",
+          isConnected: true,
+          isAcknowledgedByAdmin: true,
+          acknowledgedAt: booking.acknowledgedAt || new Date(),
+          totalPrice: booking.totalPrice || claimedRoom.price,
+          adminResponseMessage,
+        },
+      },
+      { new: true, runValidators: true }
+    );
+
+    if (!connectedBooking) {
+      await Room.updateOne(
+        { _id: claimedRoom._id, status: "occupied" },
+        { $set: { status: "available" } }
+      );
+      return res.status(409).json({
+        message: "Booking was already connected. Room was released.",
+      });
+    }
+
+    emitHotelRealtime(hotel._id, REALTIME_EVENTS.ROOM_CHANGED, {
+      action: "claimed",
+      roomId: claimedRoom._id,
+      hotelId: hotel._id,
+      status: claimedRoom.status,
+    });
+    emitUserRealtime(connectedBooking.touristId, REALTIME_EVENTS.BOOKING_CHANGED, {
+      action: "confirmed",
+      bookingId: connectedBooking._id,
+      hotelId: hotel._id,
+      roomId: claimedRoom._id,
+      status: connectedBooking.status,
+    });
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "booking-confirmed", hotelId: hotel._id });
 
     return res.json({
       message: "Tourist request connected to room successfully.",
-      booking,
+      booking: connectedBooking,
     });
   } catch (error) {
     return res
@@ -256,6 +308,17 @@ const acknowledgeRequest = async (req, res) => {
       "Admin has received your request and is reviewing the best hotel option for you.";
 
     await booking.save();
+
+    emitUserRealtime(booking.touristId, REALTIME_EVENTS.NOTIFICATION, {
+      action: "booking-acknowledged",
+      bookingId: booking._id,
+      message: booking.adminResponseMessage,
+    });
+    emitRealtime(REALTIME_EVENTS.BOOKING_CHANGED, {
+      action: "acknowledged",
+      bookingId: booking._id,
+      status: booking.status,
+    });
 
     return res.json({
       message: "User request acknowledgment sent successfully.",
@@ -445,6 +508,12 @@ const deleteHotel = async (req, res) => {
 
     await Hotel.deleteOne({ _id: hotel._id });
 
+    emitRealtime(REALTIME_EVENTS.HOTEL_CHANGED, {
+      action: "deleted",
+      hotelId: hotel._id,
+    });
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "hotel-deleted" });
+
     return res.json({
       message: "Hotel deleted successfully.",
       deletedHotelId: hotel._id,
@@ -491,6 +560,11 @@ const deleteUser = async (req, res) => {
           ),
         ]);
         await Hotel.deleteOne({ _id: hotel._id });
+        emitRealtime(REALTIME_EVENTS.HOTEL_CHANGED, {
+          action: "deleted",
+          hotelId: hotel._id,
+        });
+        emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "hotel-user-deleted" });
       } else {
         await User.deleteOne({ _id: targetUser._id });
       }
@@ -513,6 +587,10 @@ const deleteUser = async (req, res) => {
       }
 
       await Booking.deleteMany({ touristId: targetUser._id });
+      emitRealtime(REALTIME_EVENTS.BOOKING_CHANGED, {
+        action: "tourist-deleted",
+        touristId: targetUser._id,
+      });
     }
 
     await User.deleteOne({ _id: targetUser._id });

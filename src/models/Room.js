@@ -104,6 +104,7 @@ const roomSchema = new mongoose.Schema(
 );
 
 roomSchema.index({ hotelId: 1, roomNumber: 1 }, { unique: true });
+roomSchema.index({ hotelId: 1, status: 1 });
 
 roomSchema.pre("validate", function syncLegacyPricing(next) {
   if (!this.type && this.roomType) {
