@@ -14,6 +14,45 @@ const hotelSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
+    businessType: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+    serviceCategory: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+    bookingModel: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+    pricingModel: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+    pricingUnit: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    inventoryType: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    assignmentType: {
+      type: String,
+      default: "",
+      trim: true,
+    },
     location: {
       type: String,
       required: true,

@@ -1,6 +1,6 @@
 const Booking = require("../models/Booking");
-const Hotel = require("../models/Hotel");
-const HotelService = require("../models/HotelService");
+const Business = require("../models/Business");
+const BusinessService = require("../models/BusinessService");
 const Room = require("../models/Room");
 const Supplier = require("../models/Supplier");
 const {
@@ -23,7 +23,7 @@ const getMarketplaceOverview = async (_req, res) => {
       Supplier.find({}).lean(),
       Booking.find({}).lean(),
       Room.find({}).lean(),
-      HotelService.find({}).lean(),
+      BusinessService.find({}).lean(),
     ]);
 
     const analytics = buildAnalyticsSummary({ suppliers, bookings, rooms, services });
@@ -111,13 +111,13 @@ const updateSupplierVerification = async (req, res) => {
 
 const listHotelCatalog = async (_req, res) => {
   try {
-    const hotels = await Hotel.find({})
+    const hotels = await Business.find({})
       .populate("supplierId", "name category verificationStatus commission")
       .sort({ createdAt: -1 });
     const rooms = await Room.find({})
       .populate("hotelId", "name location")
       .sort({ createdAt: -1 });
-    const services = await HotelService.find({})
+    const services = await BusinessService.find({})
       .populate("hotelId", "name location")
       .sort({ createdAt: -1 });
 
@@ -163,11 +163,11 @@ const upsertHotelServiceByAdmin = async (req, res) => {
     };
 
     const service = serviceId
-      ? await HotelService.findByIdAndUpdate(serviceId, servicePayload, {
+      ? await BusinessService.findByIdAndUpdate(serviceId, servicePayload, {
           new: true,
           runValidators: true,
         })
-      : await HotelService.create(servicePayload);
+      : await BusinessService.create(servicePayload);
 
     if (!service) {
       return res.status(404).json({ message: "Service not found." });
@@ -199,9 +199,9 @@ const upsertHotelServiceByAdmin = async (req, res) => {
 const upgradeHotelMarketplaceProfile = async (req, res) => {
   try {
     const { hotelId } = req.params;
-    const hotel = await Hotel.findById(hotelId);
+    const hotel = await Business.findById(hotelId);
     if (!hotel) {
-      return res.status(404).json({ message: "Hotel not found." });
+      return res.status(404).json({ message: "Business not found." });
     }
 
     if (req.body.starRating !== undefined) hotel.starRating = req.body.starRating;
@@ -262,7 +262,7 @@ const createCompositeBooking = async (req, res) => {
 
     for (const item of serviceItems) {
       const quantity = Math.max(1, Number(item.quantity) || 1);
-      const updatedService = await HotelService.findOneAndUpdate(
+      const updatedService = await BusinessService.findOneAndUpdate(
         {
           _id: item.serviceId,
           isActive: true,
@@ -274,7 +274,7 @@ const createCompositeBooking = async (req, res) => {
 
       if (!updatedService) {
         for (const claimed of claimedServices) {
-          await HotelService.updateOne(
+          await BusinessService.updateOne(
             { _id: claimed.serviceId },
             { $inc: { "availabilitySchedule.inventory": claimed.quantity } }
           );

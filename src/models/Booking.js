@@ -30,6 +30,12 @@ const bookingSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    preferredBusinessId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Hotel",
+      default: null,
+      index: true,
+    },
     hotelId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Hotel",
@@ -46,6 +52,49 @@ const bookingSchema = new mongoose.Schema(
       ref: "Supplier",
       default: null,
       index: true,
+    },
+    businessType: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+    serviceCategory: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+    bookingModel: {
+      type: String,
+      default: "accommodation",
+      trim: true,
+      index: true,
+    },
+    pricingModel: {
+      type: String,
+      enum: ["per_night", "per_hour", "per_trip", "per_person", "fixed", "per_day", "mixed"],
+      default: "per_night",
+    },
+    pricingUnit: {
+      type: String,
+      default: "night",
+      trim: true,
+    },
+    assignmentType: {
+      type: String,
+      default: "room",
+      trim: true,
+    },
+    assignmentTargetId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
+      index: true,
+    },
+    assignmentLabel: {
+      type: String,
+      default: "",
+      trim: true,
     },
     tourHelpers: [
       {
@@ -139,6 +188,59 @@ const bookingSchema = new mongoose.Schema(
       type: Number,
       default: 1,
       min: 1,
+    },
+    quantity: {
+      type: Number,
+      default: 1,
+      min: 1,
+    },
+    reservationDate: {
+      type: Date,
+      default: null,
+    },
+    reservationTime: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    pickupLocation: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    dropoffLocation: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    vehicleType: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    durationHours: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    durationDays: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    packageType: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    specialRequests: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    bookingDetails: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
     },
     status: {
       type: String,

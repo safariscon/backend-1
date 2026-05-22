@@ -1,5 +1,5 @@
 const Booking = require("../models/Booking");
-const Hotel = require("../models/Hotel");
+const Business = require("../models/Business");
 const Room = require("../models/Room");
 const User = require("../models/User");
 const { registerHotelByAdmin } = require("./authController");
@@ -9,17 +9,10 @@ const {
   emitRealtime,
   emitUserRealtime,
 } = require("../utils/realtime");
+const { decorateBusiness, getMarketplaceTypeConfig } = require("../utils/marketplaceTypes");
 
 const registerHotel = registerHotelByAdmin;
 const registerBusiness = registerHotelByAdmin;
-
-const ACCOMMODATION_TYPES = new Set([
-  "hotel",
-  "hotels-and-resorts",
-  "homestays-and-guesthouses",
-  "tent-rentals-and-camping-sites",
-  "vacation-rentals-and-apartments",
-]);
 
 const normalizeBusinessType = (value) =>
   String(value || "hotel")
@@ -29,64 +22,22 @@ const normalizeBusinessType = (value) =>
     .replace(/[ /]+/g, "-");
 
 const getBusinessInventoryMeta = (type) => {
-  const normalizedType = normalizeBusinessType(type);
+  const config = getMarketplaceTypeConfig(type);
 
-  if (ACCOMMODATION_TYPES.has(normalizedType)) {
+  if (config.supportsRooms) {
     return {
       supportsRooms: true,
       inventoryLabel: "rooms",
       availableLabel: "available rooms",
-    };
-  }
-
-  if (
-    ["car-rentals", "motorbike-and-scooter-rentals", "taxi-and-ride-services", "bus-and-minivan-charters"].includes(
-      normalizedType
-    )
-  ) {
-    return {
-      supportsRooms: false,
-      inventoryLabel: "vehicles",
-      availableLabel: "available services",
-    };
-  }
-
-  if (
-    ["restaurants", "bars-and-pubs", "coffee-shops-and-cafes", "food-trucks-and-street-food-stalls"].includes(
-      normalizedType
-    )
-  ) {
-    return {
-      supportsRooms: false,
-      inventoryLabel: "menu items",
-      availableLabel: "available services",
-    };
-  }
-
-  if (
-    ["conference-event-halls-mice", "wedding-venues", "entertainment-venues"].includes(
-      normalizedType
-    )
-  ) {
-    return {
-      supportsRooms: false,
-      inventoryLabel: "venue packages",
-      availableLabel: "available services",
-    };
-  }
-
-  if (normalizedType === "tour-and-activity-operators") {
-    return {
-      supportsRooms: false,
-      inventoryLabel: "activities",
-      availableLabel: "available services",
+      assignmentType: "room",
     };
   }
 
   return {
     supportsRooms: false,
-    inventoryLabel: "services",
-    availableLabel: "available services",
+    inventoryLabel: config.inventoryType || "services",
+    availableLabel: `available ${config.inventoryType || "services"}`,
+    assignmentType: config.assignmentType || "service",
   };
 };
 
@@ -95,7 +46,7 @@ const getHotelStatus = async (req, res) => {
     const { hotelId } = req.params;
 
     const [hotel, rooms, bookings] = await Promise.all([
-      Hotel.findById(hotelId),
+      Business.findById(hotelId),
       Room.find({ hotelId }).sort({ roomNumber: 1 }),
       Booking.find({
         $or: [{ hotelId }, { preferredHotelId: hotelId }],
@@ -107,10 +58,11 @@ const getHotelStatus = async (req, res) => {
     ]);
 
     if (!hotel) {
-      return res.status(404).json({ message: "Hotel not found." });
+      return res.status(404).json({ message: "Business not found." });
     }
 
-    const inventoryMeta = getBusinessInventoryMeta(hotel.type);
+    const decoratedHotel = decorateBusiness(hotel);
+    const inventoryMeta = getBusinessInventoryMeta(decoratedHotel.businessType || decoratedHotel.type);
     const serviceList = Array.isArray(hotel.services) ? hotel.services : [];
     const availableRooms = rooms.filter((room) => room.status === "available");
     const occupiedRooms = rooms.filter((room) => room.status === "occupied");
@@ -125,7 +77,7 @@ const getHotelStatus = async (req, res) => {
     );
 
     return res.json({
-      hotel,
+      hotel: decoratedHotel,
       rooms,
       bookings,
       stats: {
@@ -162,16 +114,16 @@ const connectTour = async (req, res) => {
   try {
     const { bookingId, hotelId, roomId, helperIds = [] } = req.body;
 
-    if (!bookingId || !hotelId || !roomId) {
+    if (!bookingId || !hotelId) {
       return res
         .status(400)
-        .json({ message: "bookingId, hotelId and roomId are required." });
+        .json({ message: "bookingId and businessId are required." });
     }
 
     const [booking, hotel, room] = await Promise.all([
       Booking.findById(bookingId),
-      Hotel.findById(hotelId),
-      Room.findById(roomId),
+      Business.findById(hotelId),
+      roomId ? Room.findById(roomId) : null,
     ]);
 
     if (!booking) {
@@ -181,26 +133,29 @@ const connectTour = async (req, res) => {
       return res.status(400).json({ message: "Booking is already connected." });
     }
     if (!hotel) {
-      return res.status(404).json({ message: "Hotel not found." });
+      return res.status(404).json({ message: "Business not found." });
     }
-    if (!room) {
+    const business = decorateBusiness(hotel);
+    const marketplaceConfig = getMarketplaceTypeConfig(business.businessType || business.type);
+
+    if (marketplaceConfig.supportsRooms && !room) {
       return res.status(404).json({ message: "Room not found." });
     }
-    if (String(room.hotelId) !== String(hotel._id)) {
+    if (room && String(room.hotelId) !== String(hotel._id)) {
       return res
         .status(400)
-        .json({ message: "Room does not belong to this hotel." });
+        .json({ message: "Room does not belong to this business." });
     }
-    if (room.status !== "available") {
+    if (room && room.status !== "available") {
       return res.status(400).json({ message: "Room is not available." });
     }
 
     const uniqueHelperIds = Array.isArray(helperIds)
       ? [...new Set(helperIds.filter(Boolean))]
       : [];
-    if (uniqueHelperIds.length === 0) {
+    if (marketplaceConfig.assignmentType === "guide" && uniqueHelperIds.length === 0) {
       return res.status(400).json({
-        message: "Select at least one tour helper for this trip.",
+        message: "Select at least one guide for this activity booking.",
       });
     }
 
@@ -217,19 +172,26 @@ const connectTour = async (req, res) => {
       });
     }
 
-    const claimedRoom = await Room.findOneAndUpdate(
-      { _id: roomId, hotelId: hotel._id, status: "available" },
-      { $set: { status: "occupied" } },
-      { new: true, runValidators: true }
-    );
+    let claimedRoom = null;
+    if (marketplaceConfig.supportsRooms) {
+      claimedRoom = await Room.findOneAndUpdate(
+        { _id: roomId, hotelId: hotel._id, status: "available" },
+        { $set: { status: "occupied" } },
+        { new: true, runValidators: true }
+      );
 
-    if (!claimedRoom) {
-      return res.status(409).json({
-        message: "Room was just booked by another request. Please select another available room.",
-      });
+      if (!claimedRoom) {
+        return res.status(409).json({
+          message: "Room was just booked by another request. Please select another available room.",
+        });
+      }
     }
 
-    const adminResponseMessage = `Assigned to ${hotel.name} in ${hotel.location}.${helpers.length > 0 ? ` Tour helpers: ${helpers.map((helper) => `${helper.name} - ${helper.phone || helper.email}`).join(", ")}.` : ""}`;
+    const assignmentLabel = marketplaceConfig.supportsRooms
+      ? `Room ${claimedRoom.roomNumber}`
+      : `Assigned ${marketplaceConfig.assignmentType || "service"}`;
+    const helperLabel = marketplaceConfig.assignmentType === "guide" ? "Guides" : "Helpers";
+    const adminResponseMessage = `Assigned to ${hotel.name} in ${hotel.location}.${assignmentLabel ? ` ${assignmentLabel}.` : ""}${helpers.length > 0 ? ` ${helperLabel}: ${helpers.map((helper) => `${helper.name} - ${helper.phone || helper.email}`).join(", ")}.` : ""}`;
     const connectedBooking = await Booking.findOneAndUpdate(
       {
         _id: bookingId,
@@ -239,13 +201,21 @@ const connectTour = async (req, res) => {
       {
         $set: {
           hotelId: hotel._id,
-          roomId: claimedRoom._id,
+          roomId: claimedRoom?._id || null,
+          assignmentType: marketplaceConfig.assignmentType,
+          assignmentTargetId: claimedRoom?._id || hotel._id,
+          assignmentLabel,
+          businessType: marketplaceConfig.businessType,
+          serviceCategory: marketplaceConfig.serviceCategory,
+          bookingModel: marketplaceConfig.bookingModel,
+          pricingModel: marketplaceConfig.pricingModel,
+          pricingUnit: marketplaceConfig.pricingUnit,
           tourHelpers: helpers.map((helper) => helper._id),
           status: "confirmed",
           isConnected: true,
           isAcknowledgedByAdmin: true,
           acknowledgedAt: booking.acknowledgedAt || new Date(),
-          totalPrice: booking.totalPrice || claimedRoom.price,
+          totalPrice: booking.totalPrice || claimedRoom?.price || hotel.basePrice || 0,
           adminResponseMessage,
         },
       },
@@ -253,32 +223,46 @@ const connectTour = async (req, res) => {
     );
 
     if (!connectedBooking) {
-      await Room.updateOne(
-        { _id: claimedRoom._id, status: "occupied" },
-        { $set: { status: "available" } }
-      );
+      if (claimedRoom) {
+        await Room.updateOne(
+          { _id: claimedRoom._id, status: "occupied" },
+          { $set: { status: "available" } }
+        );
+      }
       return res.status(409).json({
         message: "Booking was already connected. Room was released.",
       });
     }
 
-    emitHotelRealtime(hotel._id, REALTIME_EVENTS.ROOM_CHANGED, {
-      action: "claimed",
-      roomId: claimedRoom._id,
-      hotelId: hotel._id,
-      status: claimedRoom.status,
+    if (claimedRoom) {
+      emitHotelRealtime(hotel._id, REALTIME_EVENTS.ROOM_CHANGED, {
+        action: "claimed",
+        roomId: claimedRoom._id,
+        hotelId: hotel._id,
+        businessId: hotel._id,
+        status: claimedRoom.status,
+      });
+    }
+    emitHotelRealtime(hotel._id, REALTIME_EVENTS.SERVICE_CHANGED, {
+      action: "booking-assigned",
+      businessId: hotel._id,
+      bookingId: connectedBooking._id,
+      bookingModel: marketplaceConfig.bookingModel,
+      assignmentType: marketplaceConfig.assignmentType,
     });
     emitUserRealtime(connectedBooking.touristId, REALTIME_EVENTS.BOOKING_CHANGED, {
       action: "confirmed",
       bookingId: connectedBooking._id,
       hotelId: hotel._id,
-      roomId: claimedRoom._id,
+      businessId: hotel._id,
+      roomId: claimedRoom?._id || null,
+      assignmentType: marketplaceConfig.assignmentType,
       status: connectedBooking.status,
     });
-    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "booking-confirmed", hotelId: hotel._id });
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "booking-confirmed", hotelId: hotel._id, businessId: hotel._id });
 
     return res.json({
-      message: "Tourist request connected to room successfully.",
+      message: `Booking assigned to ${marketplaceConfig.assignmentType || "service"} successfully.`,
       booking: connectedBooking,
     });
   } catch (error) {
@@ -305,7 +289,7 @@ const acknowledgeRequest = async (req, res) => {
     booking.acknowledgedAt = new Date();
     booking.adminResponseMessage =
       (message || "").trim() ||
-      "Admin has received your request and is reviewing the best hotel option for you.";
+      "Admin has received your request and is reviewing the best marketplace provider for you.";
 
     await booking.save();
 
@@ -349,7 +333,7 @@ const listUsers = async (_req, res) => {
 
 const listHotels = async (_req, res) => {
   try {
-    const hotelsRaw = await Hotel.aggregate([
+    const hotelsRaw = await Business.aggregate([
       { $sort: { createdAt: -1 } },
       {
         $lookup: {
@@ -402,11 +386,12 @@ const listHotels = async (_req, res) => {
     ]);
 
     const hotels = hotelsRaw.map((hotel) => {
-      const inventoryMeta = getBusinessInventoryMeta(hotel.type);
+      const decorated = decorateBusiness(hotel);
+      const inventoryMeta = getBusinessInventoryMeta(decorated.businessType || decorated.type);
       const servicesCount = Number(hotel.servicesCount || 0);
 
       return {
-        ...hotel,
+        ...decorated,
         inventoryLabel: inventoryMeta.inventoryLabel,
         supportsRooms: inventoryMeta.supportsRooms,
         totalInventory: inventoryMeta.supportsRooms
@@ -480,9 +465,9 @@ const listRooms = async (_req, res) => {
 const deleteHotel = async (req, res) => {
   try {
     const { hotelId } = req.params;
-    const hotel = await Hotel.findById(hotelId);
+    const hotel = await Business.findById(hotelId);
     if (!hotel) {
-      return res.status(404).json({ message: "Hotel not found." });
+      return res.status(404).json({ message: "Business not found." });
     }
 
     await Promise.all([
@@ -500,13 +485,13 @@ const deleteHotel = async (req, res) => {
             isConnected: false,
             status: "pending",
             adminResponseMessage:
-              "Your assigned hotel was removed. Admin will reassign your request.",
+              "Your assigned business was removed. Admin will reassign your request.",
           },
         }
       ),
     ]);
 
-    await Hotel.deleteOne({ _id: hotel._id });
+    await Business.deleteOne({ _id: hotel._id });
 
     emitRealtime(REALTIME_EVENTS.HOTEL_CHANGED, {
       action: "deleted",
@@ -515,7 +500,7 @@ const deleteHotel = async (req, res) => {
     emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "hotel-deleted" });
 
     return res.json({
-      message: "Hotel deleted successfully.",
+      message: "Business deleted successfully.",
       deletedHotelId: hotel._id,
     });
   } catch (error) {
@@ -540,7 +525,7 @@ const deleteUser = async (req, res) => {
     }
 
     if (targetUser.role === "hotel" && targetUser.hotelId) {
-      const hotel = await Hotel.findById(targetUser.hotelId);
+      const hotel = await Business.findById(targetUser.hotelId);
       if (hotel) {
         await Promise.all([
           User.deleteMany({ role: "hotel", hotelId: hotel._id }),
@@ -554,12 +539,12 @@ const deleteUser = async (req, res) => {
                 isConnected: false,
                 status: "pending",
                 adminResponseMessage:
-                  "Your assigned hotel owner account was removed. Admin will reassign your request.",
+                  "Your assigned business owner account was removed. Admin will reassign your request.",
               },
             }
           ),
         ]);
-        await Hotel.deleteOne({ _id: hotel._id });
+        await Business.deleteOne({ _id: hotel._id });
         emitRealtime(REALTIME_EVENTS.HOTEL_CHANGED, {
           action: "deleted",
           hotelId: hotel._id,
@@ -570,7 +555,7 @@ const deleteUser = async (req, res) => {
       }
 
       return res.json({
-        message: "Hotel user and linked hotel data deleted successfully.",
+        message: "Business owner and linked business data deleted successfully.",
       });
     }
 
@@ -649,7 +634,7 @@ const dashboardStats = async (_req, res) => {
   try {
     const [businesses, totalRooms, availableRooms, totalBookings, revenueAgg] =
       await Promise.all([
-        Hotel.find({}).select("type services"),
+        Business.find({}).select("type businessType services"),
         Room.countDocuments(),
         Room.countDocuments({ status: "available" }),
         Booking.countDocuments(),

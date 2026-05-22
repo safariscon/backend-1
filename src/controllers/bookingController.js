@@ -1,6 +1,31 @@
 const Booking = require("../models/Booking");
-const Hotel = require("../models/Hotel");
+const Business = require("../models/Business");
 const { REALTIME_EVENTS, emitUserRealtime } = require("../utils/realtime");
+const { decorateBusiness, getMarketplaceTypeConfig } = require("../utils/marketplaceTypes");
+
+const calculateQuantity = ({ bookingModel, pricingModel, checkIn, checkOut, durationHours, durationDays, quantity }) => {
+  if (pricingModel === "per_night" || bookingModel === "rental") {
+    if (!checkIn || !checkOut) return 0;
+    const start = new Date(checkIn);
+    const end = new Date(checkOut);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) return 0;
+    return Math.max(1, Math.ceil((end - start) / (1000 * 60 * 60 * 24)));
+  }
+
+  if (pricingModel === "per_hour") {
+    return Math.max(1, Number(durationHours) || 1);
+  }
+
+  if (pricingModel === "per_day") {
+    return Math.max(1, Number(durationDays) || 1);
+  }
+
+  if (pricingModel === "per_person") {
+    return Math.max(1, Number(quantity) || 1);
+  }
+
+  return 1;
+};
 
 const createBookingRequest = async (req, res) => {
   try {
@@ -12,6 +37,17 @@ const createBookingRequest = async (req, res) => {
       totalPrice,
       destinationPlace,
       destinationLocation,
+      bookingDetails = {},
+      reservationDate,
+      reservationTime,
+      pickupLocation,
+      dropoffLocation,
+      vehicleType,
+      durationHours,
+      durationDays,
+      packageType,
+      specialRequests,
+      quantity,
     } = req.body;
 
     if (!destinationPlace || !destinationLocation) {
@@ -21,23 +57,59 @@ const createBookingRequest = async (req, res) => {
     }
 
     let preferredHotelId = null;
+    let preferredBusiness = null;
     if (hotelId) {
-      const hotel = await Hotel.findById(hotelId);
+      const hotel = await Business.findById(hotelId);
       if (!hotel) {
-        return res.status(404).json({ message: "Preferred hotel not found." });
+        return res.status(404).json({ message: "Preferred business not found." });
       }
       preferredHotelId = hotel._id;
+      preferredBusiness = decorateBusiness(hotel);
     }
+
+    const marketplaceConfig = preferredBusiness
+      ? getMarketplaceTypeConfig(preferredBusiness.businessType || preferredBusiness.type)
+      : getMarketplaceTypeConfig();
+    const resolvedQuantity = calculateQuantity({
+      bookingModel: marketplaceConfig.bookingModel,
+      pricingModel: marketplaceConfig.pricingModel,
+      checkIn,
+      checkOut,
+      durationHours,
+      durationDays,
+      quantity,
+    });
+    const resolvedTotal =
+      Number(totalPrice) ||
+      (preferredBusiness ? Number(preferredBusiness.basePrice || 0) * resolvedQuantity : 0);
 
     const booking = await Booking.create({
       touristId: req.user._id,
       destinationPlace: destinationPlace.trim(),
       destinationLocation: destinationLocation.trim(),
       preferredHotelId,
+      preferredBusinessId: preferredHotelId,
+      businessType: marketplaceConfig.businessType,
+      serviceCategory: marketplaceConfig.serviceCategory,
+      bookingModel: marketplaceConfig.bookingModel,
+      pricingModel: marketplaceConfig.pricingModel,
+      pricingUnit: marketplaceConfig.pricingUnit,
+      assignmentType: marketplaceConfig.assignmentType,
       checkIn: checkIn || null,
       checkOut: checkOut || null,
       guests: Number(guests) || 1,
-      totalPrice: Number(totalPrice) || 0,
+      quantity: resolvedQuantity,
+      reservationDate: reservationDate || bookingDetails.reservationDate || null,
+      reservationTime: reservationTime || bookingDetails.reservationTime || "",
+      pickupLocation: pickupLocation || bookingDetails.pickupLocation || "",
+      dropoffLocation: dropoffLocation || bookingDetails.dropoffLocation || "",
+      vehicleType: vehicleType || bookingDetails.vehicleType || "",
+      durationHours: Number(durationHours || bookingDetails.durationHours || 0),
+      durationDays: Number(durationDays || bookingDetails.durationDays || 0),
+      packageType: packageType || bookingDetails.packageType || "",
+      specialRequests: specialRequests || bookingDetails.specialRequests || "",
+      bookingDetails,
+      totalPrice: resolvedTotal,
       status: "pending",
       isConnected: false,
       adminResponseMessage:
@@ -69,6 +141,7 @@ const listMyBookings = async (req, res) => {
     const bookings = await Booking.find({ touristId: req.user._id })
       .populate("touristId", "name email")
       .populate("preferredHotelId", "name location basePrice")
+      .populate("preferredBusinessId", "name location basePrice type businessType bookingModel pricingModel pricingUnit")
       .populate("hotelId", "name location basePrice")
       .populate("roomId", "roomNumber type price status")
       .populate("tourHelpers", "name phone email")

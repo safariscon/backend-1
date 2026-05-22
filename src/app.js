@@ -19,6 +19,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/bookings", bookingRoutes);
 app.use("/api/hotel", hotelRoutes);
+app.use("/api/business", hotelRoutes);
 app.use("/api", publicRoutes);
 
 app.use((req, res) => {

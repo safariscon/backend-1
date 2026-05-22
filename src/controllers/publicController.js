@@ -1,7 +1,8 @@
-const Hotel = require("../models/Hotel");
-const HotelService = require("../models/HotelService");
+const Business = require("../models/Business");
+const BusinessService = require("../models/BusinessService");
 const Supplier = require("../models/Supplier");
 const { getCache, setCache } = require("../utils/cache");
+const { decorateBusiness } = require("../utils/marketplaceTypes");
 
 const listPublicHotels = async (req, res) => {
   try {
@@ -11,7 +12,7 @@ const listPublicHotels = async (req, res) => {
     const cached = getCache(cacheKey);
     if (cached) return res.json(cached);
 
-    const hotels = await Hotel.find({})
+    const hotels = await Business.find({})
       .select(
         "name type location description basePrice amenities images services starRating hotelType bookingRules supplierId createdAt"
       )
@@ -20,9 +21,10 @@ const listPublicHotels = async (req, res) => {
       .limit(limit)
       .lean();
 
+    const businesses = hotels.map(decorateBusiness);
     const payload = {
-      hotels,
-      businesses: hotels,
+      hotels: businesses,
+      businesses,
       page,
       limit,
       hasMore: hotels.length === limit,
@@ -67,7 +69,7 @@ const listHotelServices = async (req, res) => {
     const cached = getCache(cacheKey);
     if (cached) return res.json(cached);
 
-    const services = await HotelService.find(filter)
+    const services = await BusinessService.find(filter)
       .select("hotelId category name description priceModel availabilitySchedule bookingIntegration")
       .sort({ category: 1, name: 1 })
       .lean();
@@ -77,7 +79,7 @@ const listHotelServices = async (req, res) => {
     return res.json(payload);
   } catch (error) {
     return res.status(500).json({
-      message: "Failed to fetch hotel services.",
+      message: "Failed to fetch marketplace services.",
       error: error.message,
     });
   }

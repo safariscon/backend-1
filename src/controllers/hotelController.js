@@ -1,6 +1,6 @@
 const Booking = require("../models/Booking");
-const Hotel = require("../models/Hotel");
-const HotelService = require("../models/HotelService");
+const Business = require("../models/Business");
+const BusinessService = require("../models/BusinessService");
 const Room = require("../models/Room");
 const {
   REALTIME_EVENTS,
@@ -30,16 +30,16 @@ const getMyHotelOverview = async (req, res) => {
 
     const [hotel, totalRooms, availableRooms, occupiedRooms, bookings, totalServices] =
       await Promise.all([
-        Hotel.findById(hotelId),
+        Business.findById(hotelId),
         Room.countDocuments({ hotelId }),
         Room.countDocuments({ hotelId, status: "available" }),
         Room.countDocuments({ hotelId, status: "occupied" }),
         Booking.countDocuments({ hotelId }),
-        HotelService.countDocuments({ hotelId, isActive: true }),
+        BusinessService.countDocuments({ hotelId, isActive: true }),
       ]);
 
     if (!hotel) {
-      return res.status(404).json({ message: "Hotel not found." });
+      return res.status(404).json({ message: "Business not found." });
     }
 
     return res.json({
@@ -249,14 +249,14 @@ const listMyServices = async (req, res) => {
     const hotelId = ensureHotelUser(req, res);
     if (!hotelId) return;
 
-    const services = await HotelService.find({ hotelId }).sort({
+    const services = await BusinessService.find({ hotelId }).sort({
       category: 1,
       name: 1,
     });
     return res.json({ services });
   } catch (error) {
     return res.status(500).json({
-      message: "Failed to fetch hotel services.",
+      message: "Failed to fetch business services.",
       error: error.message,
     });
   }
@@ -349,11 +349,11 @@ const upsertMyService = async (req, res) => {
     };
 
     const service = serviceId
-      ? await HotelService.findOneAndUpdate({ _id: serviceId, hotelId }, payload, {
+      ? await BusinessService.findOneAndUpdate({ _id: serviceId, hotelId }, payload, {
           new: true,
           runValidators: true,
         })
-      : await HotelService.create(payload);
+      : await BusinessService.create(payload);
 
     if (!service) {
       return res.status(404).json({ message: "Service not found." });
@@ -388,7 +388,7 @@ const deleteService = async (req, res) => {
     if (!hotelId) return;
 
     const { serviceId } = req.params;
-    const deleted = await HotelService.findOneAndDelete({ _id: serviceId, hotelId });
+    const deleted = await BusinessService.findOneAndDelete({ _id: serviceId, hotelId });
 
     if (!deleted) {
       return res.status(404).json({ message: "Service not found." });

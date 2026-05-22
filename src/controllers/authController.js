@@ -1,11 +1,12 @@
 const bcrypt = require("bcrypt");
 const User = require("../models/User");
-const Hotel = require("../models/Hotel");
+const Business = require("../models/Business");
 const Room = require("../models/Room");
 const Supplier = require("../models/Supplier");
 const { generateToken, buildUserPayload } = require("../utils/auth");
 const { sendHotelCredentialsEmail } = require("../utils/notify");
 const { REALTIME_EVENTS, emitRealtime } = require("../utils/realtime");
+const { getMarketplaceTypeConfig } = require("../utils/marketplaceTypes");
 
 const BUSINESS_TYPE_CONFIG = {
   hotel: {
@@ -233,7 +234,7 @@ const buildAuthUserPayload = async (user) => {
   const payload = buildUserPayload(user);
 
   if (user.role === "hotel" && user.hotelId) {
-    const hotel = await Hotel.findById(user.hotelId).select("type supplierId name");
+    const hotel = await Business.findById(user.hotelId).select("type supplierId name");
     payload.businessId = hotel?._id || user.hotelId || null;
     payload.businessType = hotel?.type || "hotel";
     payload.businessName = hotel?.name || "";
@@ -356,6 +357,7 @@ const registerHotelByAdmin = async (req, res) => {
     const parsedBasePrice = Number(basePrice || 0);
     const businessConfig =
       BUSINESS_TYPE_CONFIG[normalizedBusinessType] || BUSINESS_TYPE_CONFIG.other;
+    const marketplaceConfig = getMarketplaceTypeConfig(normalizedBusinessType);
 
     if (
       !normalizedBusinessName ||
@@ -415,9 +417,16 @@ const registerHotelByAdmin = async (req, res) => {
       },
     });
 
-    const hotel = await Hotel.create({
+    const hotel = await Business.create({
       name: normalizedBusinessName,
       type: normalizedBusinessType,
+      businessType: marketplaceConfig.businessType,
+      serviceCategory: marketplaceConfig.serviceCategory,
+      bookingModel: marketplaceConfig.bookingModel,
+      pricingModel: marketplaceConfig.pricingModel,
+      pricingUnit: marketplaceConfig.pricingUnit,
+      inventoryType: marketplaceConfig.inventoryType,
+      assignmentType: marketplaceConfig.assignmentType,
       location: normalizedLocation,
       description: normalizedDescription,
       basePrice: parsedBasePrice,
