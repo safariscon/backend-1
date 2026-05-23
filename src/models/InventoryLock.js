@@ -14,12 +14,6 @@ const inventoryLockSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
-    roomId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Room",
-      default: null,
-      index: true,
-    },
     serviceId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "HotelService",

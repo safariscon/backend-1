@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const crypto = require("crypto");
 const {
   BOOKING_ITEM_TYPES,
   BOOKING_STATUSES,
@@ -7,6 +8,19 @@ const {
 
 const bookingSchema = new mongoose.Schema(
   {
+    bookingCode: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+      index: true,
+    },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
+    },
     touristId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -26,26 +40,33 @@ const bookingSchema = new mongoose.Schema(
     },
     preferredHotelId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Hotel",
+      ref: "Business",
       default: null,
       index: true,
     },
     preferredBusinessId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Hotel",
+      ref: "Business",
+      default: null,
+      index: true,
+    },
+    businessId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Business",
       default: null,
       index: true,
     },
     hotelId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Hotel",
+      ref: "Business",
       default: null,
       index: true,
     },
-    roomId: {
+    serviceId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Room",
+      ref: "BusinessService",
       default: null,
+      index: true,
     },
     supplierId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -83,7 +104,7 @@ const bookingSchema = new mongoose.Schema(
     },
     assignmentType: {
       type: String,
-      default: "room",
+      default: "service",
       trim: true,
     },
     assignmentTargetId: {
@@ -108,7 +129,7 @@ const bookingSchema = new mongoose.Schema(
           itemType: {
             type: String,
             enum: BOOKING_ITEM_TYPES,
-            default: "room",
+            default: "service",
           },
           supplierId: {
             type: mongoose.Schema.Types.ObjectId,
@@ -118,11 +139,6 @@ const bookingSchema = new mongoose.Schema(
           hotelId: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "Hotel",
-            default: null,
-          },
-          roomId: {
-            type: mongoose.Schema.Types.ObjectId,
-            ref: "Room",
             default: null,
           },
           serviceId: {
@@ -175,6 +191,15 @@ const bookingSchema = new mongoose.Schema(
       type: Number,
       default: 0,
       min: 0,
+    },
+    startDate: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    endDate: {
+      type: Date,
+      default: null,
     },
     checkIn: {
       type: Date,
@@ -248,6 +273,18 @@ const bookingSchema = new mongoose.Schema(
       default: "pending",
       index: true,
     },
+    paymentStatus: {
+      type: String,
+      enum: ["pending", "paid", "failed", "refunded"],
+      default: "pending",
+      index: true,
+    },
+    bookingStatus: {
+      type: String,
+      enum: BOOKING_STATUSES,
+      default: "pending",
+      index: true,
+    },
     pricingMode: {
       type: String,
       enum: ["per-night", "per-hour", "per-person", "mixed"],
@@ -303,7 +340,25 @@ const bookingSchema = new mongoose.Schema(
 
 bookingSchema.index({ status: 1, createdAt: -1 });
 bookingSchema.index({ hotelId: 1, status: 1, createdAt: -1 });
+bookingSchema.index({ businessId: 1, status: 1, createdAt: -1 });
 bookingSchema.index({ touristId: 1, createdAt: -1 });
+bookingSchema.index({ userId: 1, createdAt: -1 });
 bookingSchema.index({ "items.serviceId": 1, status: 1 });
+
+bookingSchema.pre("validate", function normalizeBookingFields() {
+  this.bookingCode =
+    this.bookingCode ||
+    `BK-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+  this.userId = this.userId || this.touristId;
+  this.touristId = this.touristId || this.userId;
+  this.businessId = this.businessId || this.hotelId || this.preferredBusinessId || this.preferredHotelId;
+  this.hotelId = this.hotelId || this.businessId;
+  this.preferredBusinessId = this.preferredBusinessId || this.businessId;
+  this.preferredHotelId = this.preferredHotelId || this.businessId;
+  this.startDate = this.startDate || this.checkIn || this.reservationDate;
+  this.endDate = this.endDate || this.checkOut || this.startDate;
+  this.bookingStatus = this.bookingStatus || this.status || "pending";
+  this.status = this.status || this.bookingStatus || "pending";
+});
 
 module.exports = mongoose.model("Booking", bookingSchema);

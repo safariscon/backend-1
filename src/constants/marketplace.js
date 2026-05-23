@@ -19,21 +19,6 @@ const HOTEL_TYPES = [
   "serviced-apartment",
 ];
 
-const ROOM_TYPES = [
-  "standard",
-  "superior",
-  "deluxe",
-  "junior-suite",
-  "executive-suite",
-  "presidential-suite",
-  "connecting",
-  "adjoining",
-  "accessible",
-  "single",
-  "double",
-  "twin",
-];
-
 const SUPPLIER_CATEGORIES = [
   "accommodation",
   "transport",
@@ -50,26 +35,94 @@ const ACCOMMODATION_SUPPLIER_TYPES = [
   "apartment",
 ];
 
+const BUSINESS_TYPES = [
+  "Hotel",
+  "Resort",
+  "Apartment",
+  "Guesthouse",
+  "Tent Rental",
+  "Camping Site",
+  "Car Rental",
+  "Motorbike Rental",
+  "Taxi Service",
+  "Bus Charter",
+  "Restaurant",
+  "Bar",
+  "Coffee Shop",
+  "Food Truck",
+  "Event Hall",
+  "Wedding Venue",
+  "Tour Agency",
+  "Entertainment Venue",
+  "Gear Rental",
+  "Souvenir Shop",
+  "Spa",
+  "Wellness Center",
+  "Childcare Service",
+  "Shop",
+  "Other",
+];
+
+const SERVICE_CATEGORIES = [
+  "Accommodation",
+  "Transportation",
+  "Food & Drinks",
+  "Events",
+  "Tours",
+  "Entertainment",
+  "Shopping",
+  "Wellness",
+  "Childcare",
+];
+
 const PRICE_MODELS = ["free", "fixed", "hourly", "per-use"];
 
-const PRICING_UNITS = ["hour", "day", "person", "event", "night", "use"];
+const PRICING_UNITS = [
+  "per_hour",
+  "per_day",
+  "per_night",
+  "per_week",
+  "per_month",
+  "per_person",
+  "per_plate",
+  "per_bottle",
+  "per_session",
+  "per_event",
+  "per_trip",
+  "hour",
+  "day",
+  "person",
+  "event",
+  "night",
+  "trip",
+  "order",
+  "item",
+  "table",
+  "vehicle",
+  "service",
+  "use",
+];
+
+const SERVICE_STATUSES = ["available", "unavailable", "fully_booked", "paused"];
 
 const VERIFICATION_STATUSES = ["draft", "pending", "verified", "rejected"];
 
-const BOOKING_STATUSES = ["pending", "confirmed", "cancelled", "completed"];
+const BOOKING_STATUSES = ["pending", "confirmed", "active", "cancelled", "completed"];
 
-const BOOKING_ITEM_TYPES = ["room", "service", "transport", "experience", "retail"];
+const BOOKING_ITEM_TYPES = ["service", "transport", "experience", "retail"];
 
 const CANCELLATION_POLICY_TYPES = ["flexible", "moderate", "strict", "custom"];
 
 module.exports = {
   STAR_RATINGS,
   HOTEL_TYPES,
-  ROOM_TYPES,
+  BUSINESS_TYPES,
+  SERVICE_CATEGORIES,
   SUPPLIER_CATEGORIES,
   ACCOMMODATION_SUPPLIER_TYPES,
   PRICE_MODELS,
   PRICING_UNITS,
+  SERVICE_STATUSES,
   VERIFICATION_STATUSES,
   BOOKING_STATUSES,
   BOOKING_ITEM_TYPES,

@@ -25,12 +25,12 @@ const userSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ["admin", "tourist", "hotel", "tourHelper", "supplier", "customer"],
+      enum: ["admin", "tourist", "hotel", "tourHelper", "supplier", "customer", "business"],
       required: true,
     },
     hotelId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Hotel",
+      ref: "Business",
       default: null,
     },
     supplierId: {

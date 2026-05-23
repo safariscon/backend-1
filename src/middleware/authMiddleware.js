@@ -34,7 +34,7 @@ const adminOnly = (req, res, next) => {
 };
 
 const touristOnly = (req, res, next) => {
-  if (!req.user || req.user.role !== "tourist") {
+  if (!req.user || !["tourist", "customer"].includes(req.user.role)) {
     return res
       .status(403)
       .json({ message: "Forbidden: tourist role required." });
@@ -43,14 +43,14 @@ const touristOnly = (req, res, next) => {
 };
 
 const hotelOnly = (req, res, next) => {
-  if (!req.user || req.user.role !== "hotel") {
-    return res.status(403).json({ message: "Forbidden: hotel role required." });
+  if (!req.user || !["hotel", "supplier", "business"].includes(req.user.role)) {
+    return res.status(403).json({ message: "Forbidden: business owner role required." });
   }
   next();
 };
 
 const supplierOnly = (req, res, next) => {
-  if (!req.user || !["supplier", "hotel"].includes(req.user.role)) {
+  if (!req.user || !["supplier", "hotel", "business"].includes(req.user.role)) {
     return res.status(403).json({ message: "Forbidden: supplier role required." });
   }
   next();

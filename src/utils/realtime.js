@@ -5,9 +5,9 @@ let io = null;
 
 const REALTIME_EVENTS = {
   CATALOG_CHANGED: "catalog:changed",
-  HOTEL_CHANGED: "hotel:changed",
+  BUSINESS_CHANGED: "business:changed",
+  HOTEL_CHANGED: "business:changed",
   SERVICE_CHANGED: "service:changed",
-  ROOM_CHANGED: "room:changed",
   BOOKING_CHANGED: "booking:changed",
   NOTIFICATION: "notification:new",
 };
@@ -23,8 +23,12 @@ const initRealtime = (server) => {
   io.on("connection", (socket) => {
     socket.emit("realtime:ready", { connectedAt: new Date().toISOString() });
 
+    socket.on("business:join", (businessId) => {
+      if (businessId) socket.join(`business:${businessId}`);
+    });
+
     socket.on("hotel:join", (hotelId) => {
-      if (hotelId) socket.join(`hotel:${hotelId}`);
+      if (hotelId) socket.join(`business:${hotelId}`);
     });
 
     socket.on("user:join", (userId) => {
@@ -45,9 +49,9 @@ const emitRealtime = (event, payload = {}) => {
   if (
     [
       REALTIME_EVENTS.CATALOG_CHANGED,
+      REALTIME_EVENTS.BUSINESS_CHANGED,
       REALTIME_EVENTS.HOTEL_CHANGED,
       REALTIME_EVENTS.SERVICE_CHANGED,
-      REALTIME_EVENTS.ROOM_CHANGED,
     ].includes(event)
   ) {
     clearCache("public:");
@@ -62,7 +66,7 @@ const emitRealtime = (event, payload = {}) => {
 const emitHotelRealtime = (hotelId, event, payload = {}) => {
   emitRealtime(event, payload);
   if (io && hotelId) {
-    io.to(`hotel:${hotelId}`).emit(event, {
+    io.to(`business:${hotelId}`).emit(event, {
       ...payload,
       emittedAt: new Date().toISOString(),
     });

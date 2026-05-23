@@ -1,23 +1,13 @@
 const Booking = require("../models/Booking");
 const Business = require("../models/Business");
 const BusinessService = require("../models/BusinessService");
-const Room = require("../models/Room");
-const {
-  REALTIME_EVENTS,
-  emitHotelRealtime,
-  emitRealtime,
-  emitUserRealtime,
-} = require("../utils/realtime");
-const {
-  normalizeAvailabilityCalendar,
-  normalizeCapacity,
-  normalizePriceModel,
-  normalizeServiceSchedule,
-} = require("../services/marketplaceService");
+const { REALTIME_EVENTS, emitHotelRealtime, emitRealtime, emitUserRealtime } = require("../utils/realtime");
+const { normalizePriceModel, normalizeServiceSchedule } = require("../services/marketplaceService");
+const { clearCache } = require("../utils/cache");
 
-const ensureHotelUser = (req, res) => {
+const ensureBusinessOwner = (req, res) => {
   if (!req.user?.hotelId) {
-    res.status(400).json({ message: "Hotel user is not linked to a hotel." });
+    res.status(400).json({ message: "Business owner is not linked to a business." });
     return null;
   }
   return req.user.hotelId;
@@ -25,400 +15,204 @@ const ensureHotelUser = (req, res) => {
 
 const getMyHotelOverview = async (req, res) => {
   try {
-    const hotelId = ensureHotelUser(req, res);
-    if (!hotelId) return;
+    const businessId = ensureBusinessOwner(req, res);
+    if (!businessId) return;
 
-    const [hotel, totalRooms, availableRooms, occupiedRooms, bookings, totalServices] =
-      await Promise.all([
-        Business.findById(hotelId),
-        Room.countDocuments({ hotelId }),
-        Room.countDocuments({ hotelId, status: "available" }),
-        Room.countDocuments({ hotelId, status: "occupied" }),
-        Booking.countDocuments({ hotelId }),
-        BusinessService.countDocuments({ hotelId, isActive: true }),
-      ]);
+    const [business, services, bookings] = await Promise.all([
+      Business.findById(businessId),
+      BusinessService.find({ businessId }).sort({ createdAt: -1 }),
+      Booking.find({ businessId }).sort({ createdAt: -1 }),
+    ]);
 
-    if (!hotel) {
-      return res.status(404).json({ message: "Business not found." });
-    }
+    if (!business) return res.status(404).json({ message: "Business not found." });
+
+    const activeServices = services.filter((service) => service.isActive !== false);
+    const availableQuantity = services.reduce(
+      (sum, service) => sum + Number(service.availableQuantity || 0),
+      0
+    );
 
     return res.json({
-      hotel,
+      hotel: business,
+      business,
+      services,
       stats: {
-        totalRooms,
-        availableRooms,
-        occupiedRooms,
-        bookings,
-        services: totalServices,
+        totalServices: services.length,
+        activeServices: activeServices.length,
+        bookings: bookings.length,
+        totalBookings: bookings.length,
+        availableQuantity,
+        revenue: bookings.reduce((sum, booking) => sum + Number(booking.totalPrice || 0), 0),
       },
     });
   } catch (error) {
-    return res.status(500).json({
-      message: "Failed to fetch hotel overview.",
-      error: error.message,
-    });
+    return res.status(500).json({ message: "Failed to fetch business overview.", error: error.message });
   }
 };
 
 const listMyBookings = async (req, res) => {
   try {
-    const hotelId = ensureHotelUser(req, res);
-    if (!hotelId) return;
+    const businessId = ensureBusinessOwner(req, res);
+    if (!businessId) return;
 
-    const bookings = await Booking.find({ hotelId })
-      .populate("touristId", "name email")
-      .populate("roomId", "roomNumber type price status")
-      .populate("tourHelpers", "name phone email")
+    const bookings = await Booking.find({ businessId })
+      .populate("userId touristId", "name email phone")
+      .populate("serviceId", "title name category pricing")
       .sort({ createdAt: -1 });
 
     return res.json({ bookings });
   } catch (error) {
-    return res.status(500).json({
-      message: "Failed to fetch hotel bookings.",
-      error: error.message,
-    });
-  }
-};
-
-const listMyRooms = async (req, res) => {
-  try {
-    const hotelId = ensureHotelUser(req, res);
-    if (!hotelId) return;
-
-    const rooms = await Room.find({ hotelId }).sort({ roomNumber: 1 });
-    return res.json({ rooms });
-  } catch (error) {
-    return res.status(500).json({
-      message: "Failed to fetch rooms.",
-      error: error.message,
-    });
-  }
-};
-
-const createRoom = async (req, res) => {
-  try {
-    const hotelId = ensureHotelUser(req, res);
-    if (!hotelId) return;
-
-    const { roomNumber, type, roomType, price, pricePerNight, status } = req.body;
-    const resolvedPrice =
-      price !== undefined ? Number(price) : Number(pricePerNight);
-
-    if (!roomNumber || !Number.isFinite(resolvedPrice)) {
-      return res
-        .status(400)
-        .json({ message: "roomNumber and price are required." });
-    }
-
-    const room = await Room.create({
-      hotelId,
-      roomNumber: String(roomNumber).trim(),
-      type: (type || "standard").trim(),
-      roomType: (roomType || type || "standard").trim(),
-      price: resolvedPrice,
-      pricePerNight:
-        pricePerNight === undefined ? resolvedPrice : Number(pricePerNight),
-      capacity: normalizeCapacity(req.body.capacity),
-      amenities: Array.isArray(req.body.amenities) ? req.body.amenities : [],
-      availabilityCalendar: normalizeAvailabilityCalendar(req.body.availabilityCalendar),
-      smokingAllowed: Boolean(req.body.smokingAllowed),
-      occupancyType: String(req.body.occupancyType || "double").trim(),
-      status: status || "available",
-    });
-
-    emitHotelRealtime(hotelId, REALTIME_EVENTS.ROOM_CHANGED, {
-      action: "created",
-      roomId: room._id,
-      hotelId,
-      status: room.status,
-    });
-    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "room-created", hotelId });
-
-    return res.status(201).json({ message: "Room created successfully.", room });
-  } catch (error) {
-    return res.status(500).json({
-      message: "Failed to create room.",
-      error: error.message,
-    });
-  }
-};
-
-const updateRoom = async (req, res) => {
-  try {
-    const hotelId = ensureHotelUser(req, res);
-    if (!hotelId) return;
-
-    const { roomId } = req.params;
-    const room = await Room.findOne({ _id: roomId, hotelId });
-    if (!room) {
-      return res.status(404).json({ message: "Room not found." });
-    }
-
-    const { roomNumber, type, roomType, price, pricePerNight, status } = req.body;
-    if (roomNumber !== undefined) room.roomNumber = String(roomNumber).trim();
-    if (type !== undefined) room.type = String(type).trim();
-    if (roomType !== undefined) room.roomType = String(roomType).trim();
-    if (price !== undefined) room.price = Number(price);
-    if (pricePerNight !== undefined) room.pricePerNight = Number(pricePerNight);
-    if (req.body.capacity !== undefined) room.capacity = normalizeCapacity(req.body.capacity);
-    if (req.body.amenities !== undefined) {
-      room.amenities = Array.isArray(req.body.amenities) ? req.body.amenities : [];
-    }
-    if (req.body.availabilityCalendar !== undefined) {
-      room.availabilityCalendar = normalizeAvailabilityCalendar(
-        req.body.availabilityCalendar
-      );
-    }
-    if (req.body.smokingAllowed !== undefined) {
-      room.smokingAllowed = Boolean(req.body.smokingAllowed);
-    }
-    if (req.body.occupancyType !== undefined) {
-      room.occupancyType = String(req.body.occupancyType).trim();
-    }
-    if (status !== undefined) room.status = status;
-
-    await room.save();
-
-    emitHotelRealtime(hotelId, REALTIME_EVENTS.ROOM_CHANGED, {
-      action: "updated",
-      roomId: room._id,
-      hotelId,
-      status: room.status,
-    });
-    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "room-updated", hotelId });
-
-    return res.json({ message: "Room updated successfully.", room });
-  } catch (error) {
-    return res.status(500).json({
-      message: "Failed to update room.",
-      error: error.message,
-    });
-  }
-};
-
-const deleteRoom = async (req, res) => {
-  try {
-    const hotelId = ensureHotelUser(req, res);
-    if (!hotelId) return;
-
-    const { roomId } = req.params;
-    const room = await Room.findOne({ _id: roomId, hotelId });
-    if (!room) {
-      return res.status(404).json({ message: "Room not found." });
-    }
-
-    await Booking.updateMany(
-      { roomId: room._id, hotelId },
-      {
-        $set: {
-          roomId: null,
-          hotelId: null,
-          isConnected: false,
-          status: "pending",
-          adminResponseMessage:
-            "Your assigned room was removed by hotel owner. Admin will reassign.",
-        },
-      }
-    );
-
-    await Room.deleteOne({ _id: room._id });
-
-    emitHotelRealtime(hotelId, REALTIME_EVENTS.ROOM_CHANGED, {
-      action: "deleted",
-      roomId: room._id,
-      hotelId,
-    });
-    emitRealtime(REALTIME_EVENTS.BOOKING_CHANGED, {
-      action: "room-deleted",
-      hotelId,
-      roomId: room._id,
-    });
-    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "room-deleted", hotelId });
-
-    return res.json({ message: "Room deleted successfully." });
-  } catch (error) {
-    return res.status(500).json({
-      message: "Failed to delete room.",
-      error: error.message,
-    });
+    return res.status(500).json({ message: "Failed to fetch business bookings.", error: error.message });
   }
 };
 
 const listMyServices = async (req, res) => {
   try {
-    const hotelId = ensureHotelUser(req, res);
-    if (!hotelId) return;
+    const businessId = ensureBusinessOwner(req, res);
+    if (!businessId) return;
 
-    const services = await BusinessService.find({ hotelId }).sort({
-      category: 1,
-      name: 1,
-    });
+    const services = await BusinessService.find({ businessId }).sort({ category: 1, title: 1 });
     return res.json({ services });
   } catch (error) {
-    return res.status(500).json({
-      message: "Failed to fetch business services.",
-      error: error.message,
-    });
+    return res.status(500).json({ message: "Failed to fetch business services.", error: error.message });
   }
 };
 
 const updateBookingStatus = async (req, res) => {
   try {
-    const hotelId = ensureHotelUser(req, res);
-    if (!hotelId) return;
+    const businessId = ensureBusinessOwner(req, res);
+    if (!businessId) return;
 
     const { bookingId } = req.params;
     const { status } = req.body;
-    const allowedStatuses = ["confirmed", "cancelled", "completed"];
-
+    const allowedStatuses = ["pending", "confirmed", "active", "cancelled", "completed"];
     if (!allowedStatuses.includes(status)) {
-      return res.status(400).json({
-        message: `status must be one of: ${allowedStatuses.join(", ")}.`,
-      });
+      return res.status(400).json({ message: `status must be one of: ${allowedStatuses.join(", ")}.` });
     }
 
-    const booking = await Booking.findOne({ _id: bookingId, hotelId });
-    if (!booking) {
-      return res.status(404).json({ message: "Booking not found." });
-    }
+    const booking = await Booking.findOne({ _id: bookingId, businessId });
+    if (!booking) return res.status(404).json({ message: "Booking not found." });
 
     booking.status = status;
+    booking.bookingStatus = status;
     await booking.save();
 
-    if (status === "cancelled" && booking.roomId) {
-      await Room.updateOne(
-        { _id: booking.roomId, hotelId },
-        { $set: { status: "available" } }
-      );
-      emitHotelRealtime(hotelId, REALTIME_EVENTS.ROOM_CHANGED, {
-        action: "released",
-        roomId: booking.roomId,
-        hotelId,
-        status: "available",
-      });
-    }
-
-    emitUserRealtime(booking.touristId, REALTIME_EVENTS.BOOKING_CHANGED, {
+    const payload = {
       action: "status-updated",
       bookingId: booking._id,
-      hotelId,
-      status: booking.status,
-    });
+      bookingCode: booking.bookingCode,
+      businessId,
+      serviceId: booking.serviceId,
+      status,
+    };
+    emitRealtime("bookingStatusChanged", payload);
+    emitHotelRealtime(businessId, REALTIME_EVENTS.BOOKING_CHANGED, payload);
+    emitUserRealtime(booking.userId || booking.touristId, REALTIME_EVENTS.BOOKING_CHANGED, payload);
 
-    return res.json({
-      message: "Booking status updated successfully.",
-      booking,
-    });
+    return res.json({ message: "Booking status updated successfully.", booking });
   } catch (error) {
-    return res.status(500).json({
-      message: "Failed to update booking status.",
-      error: error.message,
-    });
+    return res.status(500).json({ message: "Failed to update booking status.", error: error.message });
   }
 };
 
 const upsertMyService = async (req, res) => {
   try {
-    const hotelId = ensureHotelUser(req, res);
-    if (!hotelId) return;
+    const businessId = ensureBusinessOwner(req, res);
+    if (!businessId) return;
 
     const { serviceId } = req.params;
-    const { category, name, description } = req.body;
-    if (!category || !name) {
-      return res.status(400).json({ message: "category and name are required." });
+    const { category, serviceType, name, title, description } = req.body;
+    const serviceTitle = String(title || name || "").trim();
+    if (!category || !serviceTitle) {
+      return res.status(400).json({ message: "category and title are required." });
     }
 
     const payload = {
-      hotelId,
+      businessId,
+      hotelId: businessId,
       category: String(category).trim(),
-      name: String(name).trim(),
+      serviceType: String(serviceType || category || "rental").trim(),
+      title: serviceTitle,
+      name: serviceTitle,
       description: String(description || "").trim(),
+      images: Array.isArray(req.body.images) ? req.body.images : [],
+      pricing: {
+        amount: Number(req.body.pricing?.amount ?? req.body.priceModel?.amount ?? 0),
+        unit: String(req.body.pricing?.unit || req.body.priceModel?.unit || "per_day").trim(),
+        currency: String(req.body.pricing?.currency || req.body.priceModel?.currency || "USD").trim(),
+      },
+      priceText: String(req.body.priceText || req.body.price || "").trim(),
+      availableQuantity: Math.max(0, Number(req.body.availableQuantity ?? req.body.availabilitySchedule?.inventory ?? 1)),
+      features: Array.isArray(req.body.features) ? req.body.features : [],
+      location: String(req.body.location || "").trim(),
+      status: String(req.body.status || "available").trim(),
+      rules: Array.isArray(req.body.rules) ? req.body.rules : [],
+      cancellationPolicy: String(req.body.cancellationPolicy || "").trim(),
       priceModel: normalizePriceModel(req.body.priceModel),
       availabilitySchedule: normalizeServiceSchedule(req.body.availabilitySchedule),
       bookingIntegration: {
-        bookableWithReservation:
-          req.body.bookingIntegration?.bookableWithReservation !== false,
-        requiresSeparateConfirmation: Boolean(
-          req.body.bookingIntegration?.requiresSeparateConfirmation
-        ),
-        providerReference: String(
-          req.body.bookingIntegration?.providerReference || ""
-        ).trim(),
+        bookableWithReservation: req.body.bookingIntegration?.bookableWithReservation !== false,
+        requiresSeparateConfirmation: Boolean(req.body.bookingIntegration?.requiresSeparateConfirmation),
+        providerReference: String(req.body.bookingIntegration?.providerReference || "").trim(),
       },
       isActive: req.body.isActive !== false,
     };
 
     const service = serviceId
-      ? await BusinessService.findOneAndUpdate({ _id: serviceId, hotelId }, payload, {
-          new: true,
-          runValidators: true,
-        })
+      ? await BusinessService.findOneAndUpdate({ _id: serviceId, businessId }, payload, { new: true, runValidators: true })
       : await BusinessService.create(payload);
 
-    if (!service) {
-      return res.status(404).json({ message: "Service not found." });
-    }
+    if (!service) return res.status(404).json({ message: "Service not found." });
 
-    emitHotelRealtime(hotelId, REALTIME_EVENTS.SERVICE_CHANGED, {
+    const updatePayload = {
       action: serviceId ? "updated" : "created",
       serviceId: service._id,
-      hotelId,
-      isActive: service.isActive,
-      inventory: service.availabilitySchedule?.inventory,
-    });
-    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "service-saved", hotelId });
+      businessId,
+      availableQuantity: service.availableQuantity,
+      status: service.status,
+    };
+    emitRealtime("serviceUpdated", service);
+    emitHotelRealtime(businessId, REALTIME_EVENTS.SERVICE_CHANGED, updatePayload);
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "service-saved", businessId });
+    clearCache("public:");
 
     return res.json({
-      message: serviceId
-        ? "Service updated successfully."
-        : "Service created successfully.",
+      message: serviceId ? "Service updated successfully." : "Service created successfully.",
       service,
     });
   } catch (error) {
-    return res.status(500).json({
-      message: "Failed to save service.",
-      error: error.message,
-    });
+    return res.status(500).json({ message: "Failed to save service.", error: error.message });
   }
 };
 
 const deleteService = async (req, res) => {
   try {
-    const hotelId = ensureHotelUser(req, res);
-    if (!hotelId) return;
+    const businessId = ensureBusinessOwner(req, res);
+    if (!businessId) return;
 
     const { serviceId } = req.params;
-    const deleted = await BusinessService.findOneAndDelete({ _id: serviceId, hotelId });
+    const deleted = await BusinessService.findOneAndDelete({ _id: serviceId, businessId });
+    if (!deleted) return res.status(404).json({ message: "Service not found." });
 
-    if (!deleted) {
-      return res.status(404).json({ message: "Service not found." });
-    }
-
-    emitHotelRealtime(hotelId, REALTIME_EVENTS.SERVICE_CHANGED, {
+    emitHotelRealtime(businessId, REALTIME_EVENTS.SERVICE_CHANGED, {
       action: "deleted",
       serviceId: deleted._id,
-      hotelId,
+      businessId,
     });
-    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "service-deleted", hotelId });
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "service-deleted", businessId });
+    clearCache("public:");
 
     return res.json({ message: "Service deleted successfully." });
   } catch (error) {
-    return res.status(500).json({
-      message: "Failed to delete service.",
-      error: error.message,
-    });
+    return res.status(500).json({ message: "Failed to delete service.", error: error.message });
   }
 };
 
 module.exports = {
   getMyHotelOverview,
   listMyBookings,
-  listMyRooms,
   listMyServices,
   updateBookingStatus,
-  createRoom,
-  updateRoom,
   upsertMyService,
   deleteService,
-  deleteRoom,
 };
