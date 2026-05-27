@@ -9,24 +9,11 @@ const PORT = process.env.PORT || 5000;
 
 const startServer = async () => {
   try {
-    app.locals.dbReady = false;
-
-    try {
-      await connectDB();
-      app.locals.dbReady = true;
-      await seedAdmin();
-    } catch (error) {
-      console.warn(`MongoDB unavailable: ${error.message}`);
-      console.warn("Starting server without database-backed routes.");
-    }
+    await connectDB();
+    await seedAdmin();
 
     const server = http.createServer(app);
     initRealtime(server);
-
-    server.on("error", (error) => {
-      console.error("Failed to start server:", error.message);
-      process.exit(1);
-    });
 
     server.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);

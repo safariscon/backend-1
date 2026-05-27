@@ -1,17 +1,17 @@
 const express = require("express");
 const {
   createBookingRequest,
-  createServiceBooking,
   listMyBookings,
-  getMyBookingById,
+  payBooking,
+  downloadReceipt,
 } = require("../controllers/bookingController");
 const { protect, touristOnly } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
 router.post("/request", protect, touristOnly, createBookingRequest);
-router.post("/service", protect, touristOnly, createServiceBooking);
 router.get("/my", protect, touristOnly, listMyBookings);
-router.get("/my/:bookingId", protect, touristOnly, getMyBookingById);
+router.post("/:bookingId/pay", protect, touristOnly, payBooking);
+router.get("/:bookingId/receipt", protect, touristOnly, downloadReceipt);
 
 module.exports = router;

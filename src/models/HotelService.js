@@ -53,6 +53,27 @@ const hotelServiceSchema = new mongoose.Schema(
         trim: true,
       },
     },
+    priceText: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    images: {
+      type: [String],
+      default: [],
+    },
+    approvalStatus: {
+      type: String,
+      enum: ["draft", "pending", "approved", "rejected"],
+      default: "pending",
+      index: true,
+    },
+    status: {
+      type: String,
+      enum: ["available", "unavailable", "paused"],
+      default: "available",
+      index: true,
+    },
     availabilitySchedule: {
       timezone: {
         type: String,
@@ -122,5 +143,6 @@ const hotelServiceSchema = new mongoose.Schema(
 
 hotelServiceSchema.index({ isActive: 1, category: 1, name: 1 });
 hotelServiceSchema.index({ hotelId: 1, isActive: 1, category: 1 });
+hotelServiceSchema.index({ approvalStatus: 1, status: 1, isActive: 1 });
 
 module.exports = mongoose.model("HotelService", hotelServiceSchema);

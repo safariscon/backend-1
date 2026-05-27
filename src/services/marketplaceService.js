@@ -107,6 +107,7 @@ const buildSupplierPayload = (payload = {}) => ({
 const buildAnalyticsSummary = ({
   suppliers = [],
   bookings = [],
+  rooms = [],
   services = [],
 }) => {
   const confirmedBookings = bookings.filter((booking) =>
@@ -129,11 +130,8 @@ const buildAnalyticsSummary = ({
     return sum + itemCommission;
   }, 0);
 
-  const activeServiceCount = services.filter((service) => service.isActive !== false).length;
-  const availableQuantity = services.reduce(
-    (sum, service) => sum + Number(service.availableQuantity || service.availabilitySchedule?.inventory || 0),
-    0
-  );
+  const occupiedRooms = rooms.filter((room) => room.status === "occupied").length;
+  const occupancyRate = rooms.length === 0 ? 0 : (occupiedRooms / rooms.length) * 100;
 
   return {
     supplierCount: suppliers.length,
@@ -144,12 +142,11 @@ const buildAnalyticsSummary = ({
       (supplier) => supplier.verificationStatus === "pending"
     ).length,
     serviceCount: services.length,
-    activeServiceCount,
-    availableQuantity,
     bookingCount: bookings.length,
     confirmedBookingCount: confirmedBookings.length,
     revenue,
     commissionRevenue,
+    occupancyRate: Number(occupancyRate.toFixed(2)),
   };
 };
 

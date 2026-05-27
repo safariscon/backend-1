@@ -50,37 +50,6 @@ const uploadImage = async (req, res) => {
   }
 };
 
-const uploadImages = async (req, res) => {
-  try {
-    const files = req.files || [];
-    if (!files.length) {
-      return res.status(400).json({ message: "At least one image file is required." });
-    }
-    if (files.length > 3) {
-      return res.status(400).json({ message: "Upload a maximum of 3 images." });
-    }
-
-    const uploads = await Promise.all(files.map(uploadBufferToCloudinary));
-
-    return res.status(201).json({
-      images: uploads.map((result) => ({
-        url: result.secure_url,
-        publicId: result.public_id,
-        width: result.width,
-        height: result.height,
-        format: result.format,
-      })),
-      urls: uploads.map((result) => result.secure_url),
-    });
-  } catch (error) {
-    return res.status(500).json({
-      message: "Image upload failed.",
-      error: error.message,
-    });
-  }
-};
-
 module.exports = {
   uploadImage,
-  uploadImages,
 };

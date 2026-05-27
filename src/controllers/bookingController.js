@@ -1,33 +1,8 @@
 const Booking = require("../models/Booking");
-const Business = require("../models/Business");
-const BusinessService = require("../models/BusinessService");
+const Hotel = require("../models/Hotel");
+const Transaction = require("../models/Transaction");
 const { REALTIME_EVENTS, emitUserRealtime } = require("../utils/realtime");
-const { emitRealtime, emitHotelRealtime } = require("../utils/realtime");
-const { decorateBusiness, getMarketplaceTypeConfig } = require("../utils/marketplaceTypes");
-
-const calculateQuantity = ({ bookingModel, pricingModel, checkIn, checkOut, durationHours, durationDays, quantity }) => {
-  if (pricingModel === "per_night" || bookingModel === "rental") {
-    if (!checkIn || !checkOut) return 0;
-    const start = new Date(checkIn);
-    const end = new Date(checkOut);
-    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) return 0;
-    return Math.max(1, Math.ceil((end - start) / (1000 * 60 * 60 * 24)));
-  }
-
-  if (pricingModel === "per_hour") {
-    return Math.max(1, Number(durationHours) || 1);
-  }
-
-  if (pricingModel === "per_day") {
-    return Math.max(1, Number(durationDays) || 1);
-  }
-
-  if (pricingModel === "per_person") {
-    return Math.max(1, Number(quantity) || 1);
-  }
-
-  return 1;
-};
+const { prefixedCode, secureToken } = require("../utils/secureIds");
 
 const createBookingRequest = async (req, res) => {
   try {
@@ -36,20 +11,10 @@ const createBookingRequest = async (req, res) => {
       checkIn,
       checkOut,
       guests,
+      quantity,
       totalPrice,
       destinationPlace,
       destinationLocation,
-      bookingDetails = {},
-      reservationDate,
-      reservationTime,
-      pickupLocation,
-      dropoffLocation,
-      vehicleType,
-      durationHours,
-      durationDays,
-      packageType,
-      specialRequests,
-      quantity,
     } = req.body;
 
     if (!destinationPlace || !destinationLocation) {
@@ -59,59 +24,32 @@ const createBookingRequest = async (req, res) => {
     }
 
     let preferredHotelId = null;
-    let preferredBusiness = null;
     if (hotelId) {
-      const hotel = await Business.findById(hotelId);
+      const hotel = await Hotel.findById(hotelId);
       if (!hotel) {
-        return res.status(404).json({ message: "Preferred business not found." });
+        return res.status(404).json({ message: "Preferred hotel not found." });
       }
       preferredHotelId = hotel._id;
-      preferredBusiness = decorateBusiness(hotel);
     }
-
-    const marketplaceConfig = preferredBusiness
-      ? getMarketplaceTypeConfig(preferredBusiness.businessType || preferredBusiness.type)
-      : getMarketplaceTypeConfig();
-    const resolvedQuantity = calculateQuantity({
-      bookingModel: marketplaceConfig.bookingModel,
-      pricingModel: marketplaceConfig.pricingModel,
-      checkIn,
-      checkOut,
-      durationHours,
-      durationDays,
-      quantity,
-    });
-    const resolvedTotal =
-      Number(totalPrice) ||
-      (preferredBusiness ? Number(preferredBusiness.basePrice || 0) * resolvedQuantity : 0);
+    const bookingQuantity = Math.max(1, Number(quantity || guests || 1));
+    const bookingCode = prefixedCode("SCN", 10);
+    const verificationCode = prefixedCode("VERIFY", 10);
+    const verificationToken = secureToken([req.user._id, preferredHotelId, bookingCode]);
 
     const booking = await Booking.create({
       touristId: req.user._id,
       destinationPlace: destinationPlace.trim(),
       destinationLocation: destinationLocation.trim(),
       preferredHotelId,
-      preferredBusinessId: preferredHotelId,
-      businessType: marketplaceConfig.businessType,
-      serviceCategory: marketplaceConfig.serviceCategory,
-      bookingModel: marketplaceConfig.bookingModel,
-      pricingModel: marketplaceConfig.pricingModel,
-      pricingUnit: marketplaceConfig.pricingUnit,
-      assignmentType: marketplaceConfig.assignmentType,
       checkIn: checkIn || null,
       checkOut: checkOut || null,
-      guests: Number(guests) || 1,
-      quantity: resolvedQuantity,
-      reservationDate: reservationDate || bookingDetails.reservationDate || null,
-      reservationTime: reservationTime || bookingDetails.reservationTime || "",
-      pickupLocation: pickupLocation || bookingDetails.pickupLocation || "",
-      dropoffLocation: dropoffLocation || bookingDetails.dropoffLocation || "",
-      vehicleType: vehicleType || bookingDetails.vehicleType || "",
-      durationHours: Number(durationHours || bookingDetails.durationHours || 0),
-      durationDays: Number(durationDays || bookingDetails.durationDays || 0),
-      packageType: packageType || bookingDetails.packageType || "",
-      specialRequests: specialRequests || bookingDetails.specialRequests || "",
-      bookingDetails,
-      totalPrice: resolvedTotal,
+      guests: Number(guests) || bookingQuantity,
+      quantity: bookingQuantity,
+      totalPrice: Number(totalPrice) || 0,
+      bookingCode,
+      verificationCode,
+      verificationToken,
+      paymentStatus: "unpaid",
       status: "pending",
       isConnected: false,
       adminResponseMessage:
@@ -138,192 +76,112 @@ const createBookingRequest = async (req, res) => {
   }
 };
 
-const multiplierForUnit = ({ unit, quantity, startDate, endDate, durationHours, durationDays, bookingType }) => {
-  if (bookingType === "transport") return Math.max(1, Number(durationDays) || 1);
-  if (bookingType === "appointment") return Math.max(1, Number(durationHours) || 1);
-  if (unit === "per_hour") return Math.max(1, Number(durationHours) || 1);
-  if (["per_day", "per_night"].includes(unit)) {
-    if (startDate && endDate) {
-      const start = new Date(startDate);
-      const end = new Date(endDate);
-      if (!Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime()) && end > start) {
-        return Math.max(1, Math.ceil((end - start) / (1000 * 60 * 60 * 24)));
-      }
-    }
-    return Math.max(1, Number(durationDays) || 1);
-  }
-  return Math.max(1, Number(quantity) || 1);
-};
+const buildQrPayload = (booking, business, user) =>
+  JSON.stringify({
+    bookingId: booking._id,
+    bookingCode: booking.bookingCode,
+    user: { id: user?._id || booking.touristId, name: user?.name, email: user?.email },
+    business: business
+      ? { id: business._id, name: business.name, sellerEmail: business.sellerContactEmail || business.ownerEmail, type: business.type }
+      : null,
+    amount: booking.amountPaid || booking.totalPrice,
+    paymentStatus: booking.paymentStatus,
+    bookingStatus: booking.status,
+    quantity: booking.quantity,
+    verificationToken: booking.verificationToken,
+    verifyUrl: `${process.env.PUBLIC_API_URL || ""}/api/verify/${booking.verificationToken}`,
+  });
 
-const parsePriceTextAmount = (priceText) => {
-  const match = String(priceText || "").replace(/,/g, "").match(/\d+(\.\d+)?/);
-  return match ? Number(match[0]) : 0;
-};
-
-const createServiceBooking = async (req, res) => {
+const payBooking = async (req, res) => {
   try {
-    const {
-      serviceId,
-      quantity = 1,
-      startDate,
-      endDate,
-      durationHours,
-      durationDays,
-      reservationTime,
-      destinationPlace,
-      destinationLocation,
-      pickupLocation,
-      dropoffLocation,
-      vehicleType,
-      packageType,
-      specialRequests,
-      bookingDetails = {},
-    } = req.body;
+    const { bookingId } = req.params;
+    const method = req.body.paymentMethod || "mobile-money";
+    const senderAccount = String(req.body.senderAccount || req.user.email || "").trim();
 
-    if (!serviceId) {
-      return res.status(400).json({ message: "serviceId is required." });
+    const booking = await Booking.findOne({ _id: bookingId, touristId: req.user._id }).populate("touristId", "name email");
+    if (!booking) return res.status(404).json({ message: "Booking not found." });
+    if (booking.status !== "confirmed") {
+      return res.status(400).json({ message: "Booking must be approved by admin before payment." });
     }
 
-    const requestedQuantity = Math.max(1, Number(quantity) || 1);
-    const service = await BusinessService.findOneAndUpdate(
-      {
-        _id: serviceId,
-        isActive: true,
-        status: "available",
-        availableQuantity: { $gte: requestedQuantity },
-      },
-      { $inc: { availableQuantity: -requestedQuantity } },
-      { new: true, runValidators: true }
-    );
+    const business = booking.hotelId ? await Hotel.findById(booking.hotelId) : null;
+    const amount = Number(booking.totalPrice || business?.basePrice || 0);
+    const commissionAmount = Math.round(amount * Number(process.env.PLATFORM_COMMISSION_RATE || 0.12) * 100) / 100;
+    const paymentReference = prefixedCode("PAY", 14);
 
-    if (!service) {
-      return res.status(409).json({
-        message: "This service is not available in that quantity right now.",
-      });
-    }
+    booking.paymentStatus = "paid";
+    booking.paymentMethod = method;
+    booking.paymentReference = paymentReference;
+    booking.amountPaid = amount;
+    booking.qrPayload = buildQrPayload(booking, business, booking.touristId);
+    await booking.save();
 
-    if (service.availableQuantity === 0) {
-      service.status = "fully_booked";
-      await service.save();
-    }
-
-    const business = await Business.findById(service.businessId || service.hotelId);
-    if (!business) {
-      await BusinessService.updateOne(
-        { _id: service._id },
-        { $inc: { availableQuantity: requestedQuantity }, $set: { status: "available" } }
-      );
-      return res.status(404).json({ message: "Business not found for this service." });
-    }
-
-    const units = multiplierForUnit({
-      unit: service.pricing?.unit,
-      quantity: requestedQuantity,
-      startDate,
-      endDate,
-      durationHours,
-      durationDays,
-      bookingType: bookingDetails.bookingType,
-    });
-    const unitPrice = Number(service.pricing?.amount || 0) || parsePriceTextAmount(service.priceText);
-    const totalPrice = unitPrice * requestedQuantity * units;
-
-    const booking = await Booking.create({
+    const transaction = await Transaction.create({
+      transactionId: prefixedCode("TXN", 14),
+      bookingId: booking._id,
       userId: req.user._id,
-      touristId: req.user._id,
-      businessId: business._id,
-      hotelId: business._id,
-      preferredBusinessId: business._id,
-      preferredHotelId: business._id,
-      serviceId: service._id,
-      destinationPlace: String(destinationPlace || bookingDetails.destinationPlace || service.title || service.name).trim(),
-      destinationLocation: String(destinationLocation || bookingDetails.destinationLocation || service.location || business.location).trim(),
-      businessType: business.businessType || business.type,
-      serviceCategory: service.category,
-      pricingModel: service.pricing?.unit || "per_day",
-      pricingUnit: service.pricing?.unit || "per_day",
-      assignmentType: "service",
-      assignmentTargetId: service._id,
-      assignmentLabel: service.title || service.name,
-      quantity: requestedQuantity,
-      startDate: startDate || null,
-      endDate: endDate || startDate || null,
-      checkIn: startDate || null,
-      checkOut: endDate || null,
-      reservationDate: startDate || null,
-      reservationTime: reservationTime || "",
-      pickupLocation: pickupLocation || bookingDetails.pickupLocation || "",
-      dropoffLocation: dropoffLocation || bookingDetails.dropoffLocation || "",
-      vehicleType: vehicleType || bookingDetails.vehicleType || "",
-      durationHours: Number(durationHours || 0),
-      durationDays: Number(durationDays || 0),
-      packageType: packageType || bookingDetails.packageType || "",
-      specialRequests: specialRequests || "",
-      bookingDetails,
-      totalPrice,
-      paymentStatus: "pending",
-      bookingStatus: "pending",
-      status: "pending",
-      items: [
-        {
-          itemType: "service",
-          hotelId: business._id,
-          serviceId: service._id,
-          name: service.title || service.name,
-          quantity: requestedQuantity,
-          pricingUnit: service.pricing?.unit || "per_day",
-          unitPrice,
-          total: totalPrice,
-        },
-      ],
+      sellerId: business?.ownerUserId || null,
+      businessId: business?._id || null,
+      amount,
+      commissionAmount,
+      sellerEarnings: Math.max(0, amount - commissionAmount),
+      paymentMethod: method,
+      senderAccount,
+      receiverAccount: business?.sellerContactEmail || business?.ownerEmail || "SafarisCon Platform",
+      paymentReference,
+      status: "paid",
     });
 
-    const updatePayload = {
-      action: "booked",
-      serviceId: service._id,
-      businessId: business._id,
-      availableQuantity: service.availableQuantity,
-      status: service.status,
-    };
-    emitRealtime("newBooking", {
-      bookingId: booking._id,
-      bookingCode: booking.bookingCode,
-      serviceId: service._id,
-      businessId: business._id,
-      status: booking.status,
-    });
-    emitRealtime("serviceUpdated", service);
-    emitRealtime(REALTIME_EVENTS.SERVICE_CHANGED, updatePayload);
-    emitHotelRealtime(business._id, REALTIME_EVENTS.SERVICE_CHANGED, updatePayload);
     emitUserRealtime(req.user._id, REALTIME_EVENTS.BOOKING_CHANGED, {
-      action: "created",
+      action: "paid",
       bookingId: booking._id,
-      bookingCode: booking.bookingCode,
-      status: booking.status,
+      paymentStatus: booking.paymentStatus,
     });
 
-    return res.status(201).json({
-      message: "Booking request sent.",
+    return res.json({
+      message: "Payment recorded successfully.",
       booking,
-      service,
+      transaction,
+      qr: {
+        payload: booking.qrPayload,
+        verificationCode: booking.verificationCode,
+        verificationToken: booking.verificationToken,
+        verifyUrl: `/verify/${booking.verificationToken}`,
+      },
     });
   } catch (error) {
-    return res.status(500).json({
-      message: "Failed to create service booking.",
-      error: error.message,
-    });
+    return res.status(500).json({ message: "Payment failed.", error: error.message });
+  }
+};
+
+const receiptHtml = (booking, business) => `<!doctype html>
+<html><head><meta charset="utf-8"><title>${booking.bookingCode} receipt</title>
+<style>body{font-family:Arial,sans-serif;color:#111827;margin:40px}.ticket{border:1px solid #d1d5db;border-radius:18px;overflow:hidden;max-width:860px}.head{background:#0f766e;color:white;padding:28px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;padding:24px}.box{border:1px solid #e5e7eb;border-radius:12px;padding:16px}.muted{color:#6b7280;font-size:12px;text-transform:uppercase}.big{font-size:24px;font-weight:800}.qr{font-family:monospace;word-break:break-all;background:#f3f4f6;padding:14px;border-radius:10px}.sig{font-family:cursive;font-size:24px}.ok{color:#047857;font-weight:800}@media print{button{display:none}}</style>
+</head><body><button onclick="window.print()">Download PDF</button><section class="ticket"><div class="head"><div class="muted" style="color:#ccfbf1">SafarisCon Marketplace</div><div class="big">Booking Receipt</div><p>Professional reservation receipt and QR verification record</p></div><div class="grid"><div class="box"><div class="muted">Booking ID</div><div class="big">${booking.bookingCode}</div><p>Status: ${booking.status}</p><p>Verification: <span class="ok">${booking.paymentStatus === "paid" ? "VERIFIED" : "PENDING"}</span></p></div><div class="box"><div class="muted">Payment</div><div class="big">${booking.amountPaid || booking.totalPrice} RWF</div><p>Method: ${booking.paymentMethod || "Pending"}</p><p>Reference: ${booking.paymentReference || "-"}</p></div><div class="box"><div class="muted">Customer</div><p>${booking.touristId?.name || "Customer"}</p><p>${booking.touristId?.email || ""}</p><p>Quantity: ${booking.quantity}</p></div><div class="box"><div class="muted">Seller / Business</div><p>${business?.name || "Pending assignment"}</p><p>${business?.sellerContactEmail || business?.ownerEmail || ""}</p><p>${business?.location || ""}</p></div><div class="box" style="grid-column:1/-1"><div class="muted">QR Verification Data</div><div class="qr">${booking.qrPayload || booking.verificationToken}</div></div><div class="box"><div class="muted">Issued</div><p>${new Date().toLocaleString()}</p></div><div class="box"><div class="muted">Admin Signature</div><div class="sig">SafarisCon Admin</div></div></div></section></body></html>`;
+
+const downloadReceipt = async (req, res) => {
+  try {
+    const booking = await Booking.findOne({ _id: req.params.bookingId, touristId: req.user._id })
+      .populate("touristId", "name email")
+      .populate("hotelId", "name ownerEmail sellerContactEmail location type");
+    if (!booking) return res.status(404).json({ message: "Booking not found." });
+    if (booking.paymentStatus !== "paid") {
+      return res.status(400).json({ message: "Receipt is available after successful payment." });
+    }
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.send(receiptHtml(booking, booking.hotelId));
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to generate receipt.", error: error.message });
   }
 };
 
 const listMyBookings = async (req, res) => {
   try {
-    const bookings = await Booking.find({ $or: [{ touristId: req.user._id }, { userId: req.user._id }] })
+    const bookings = await Booking.find({ touristId: req.user._id })
       .populate("touristId", "name email")
       .populate("preferredHotelId", "name location basePrice")
-      .populate("preferredBusinessId", "name location basePrice type businessType bookingModel pricingModel pricingUnit")
-      .populate("hotelId", "name location basePrice")
-      .populate("businessId", "businessName name location basePrice")
-      .populate("serviceId", "title name category pricing availableQuantity status")
+      .populate("hotelId", "name location basePrice sellerContactEmail")
+      .populate("roomId", "roomNumber type price status")
       .populate("tourHelpers", "name phone email")
       .sort({ createdAt: -1 });
 
@@ -336,32 +194,9 @@ const listMyBookings = async (req, res) => {
   }
 };
 
-const getMyBookingById = async (req, res) => {
-  try {
-    const booking = await Booking.findById(req.params.bookingId)
-      .populate("businessId", "businessName name location phone email verificationStatus")
-      .populate("serviceId", "title name category pricing availableQuantity status");
-
-    if (!booking) {
-      return res.status(404).json({ message: "Booking not found." });
-    }
-
-    if (String(booking.userId || booking.touristId) !== String(req.user._id)) {
-      return res.status(403).json({ message: "Unauthorized" });
-    }
-
-    return res.json({ booking });
-  } catch (error) {
-    return res.status(500).json({
-      message: "Failed to fetch booking.",
-      error: error.message,
-    });
-  }
-};
-
 module.exports = {
   createBookingRequest,
-  createServiceBooking,
   listMyBookings,
-  getMyBookingById,
+  payBooking,
+  downloadReceipt,
 };

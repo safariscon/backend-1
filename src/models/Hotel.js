@@ -14,45 +14,6 @@ const hotelSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
-    businessType: {
-      type: String,
-      default: "",
-      trim: true,
-      index: true,
-    },
-    serviceCategory: {
-      type: String,
-      default: "",
-      trim: true,
-      index: true,
-    },
-    bookingModel: {
-      type: String,
-      default: "",
-      trim: true,
-      index: true,
-    },
-    pricingModel: {
-      type: String,
-      default: "",
-      trim: true,
-      index: true,
-    },
-    pricingUnit: {
-      type: String,
-      default: "",
-      trim: true,
-    },
-    inventoryType: {
-      type: String,
-      default: "",
-      trim: true,
-    },
-    assignmentType: {
-      type: String,
-      default: "",
-      trim: true,
-    },
     location: {
       type: String,
       required: true,
@@ -103,6 +64,39 @@ const hotelSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    ownerUserId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
+    },
+    approvalStatus: {
+      type: String,
+      enum: ["draft", "pending", "approved", "rejected"],
+      default: "pending",
+      index: true,
+    },
+    status: {
+      type: String,
+      enum: ["available", "unavailable", "paused"],
+      default: "available",
+      index: true,
+    },
+    availableQuantity: {
+      type: Number,
+      default: 1,
+      min: 0,
+    },
+    quantityRemaining: {
+      type: Number,
+      default: 1,
+      min: 0,
+    },
+    priceText: {
+      type: String,
+      default: "",
+      trim: true,
+    },
     bookingRules: {
       minStay: {
         type: Number,
@@ -144,7 +138,12 @@ const hotelSchema = new mongoose.Schema(
       required: true,
       lowercase: true,
       trim: true,
-      unique: true,
+    },
+    sellerContactEmail: {
+      type: String,
+      default: "",
+      lowercase: true,
+      trim: true,
     },
   },
   { timestamps: true }
@@ -152,6 +151,8 @@ const hotelSchema = new mongoose.Schema(
 
 hotelSchema.index({ location: 1, type: 1, createdAt: -1 });
 hotelSchema.index({ basePrice: 1, createdAt: -1 });
+hotelSchema.index({ approvalStatus: 1, status: 1, createdAt: -1 });
+hotelSchema.index({ ownerUserId: 1, createdAt: -1 });
 
 hotelSchema.pre("validate", function rejectInlineImages() {
   const inlineImage = (this.images || []).find((image) =>
