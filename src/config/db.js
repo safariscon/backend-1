@@ -39,12 +39,19 @@ const connectDB = async () => {
 
   const srvUri = process.env.MONGODB_URI;
   const directUri = process.env.MONGODB_URI_DIRECT;
+  const preferDirect = String(process.env.MONGODB_PREFER_DIRECT || "true").toLowerCase() === "true";
 
   if (!srvUri && !directUri) {
     throw new Error("MONGODB_URI or MONGODB_URI_DIRECT must be set.");
   }
 
   const connectionOptions = buildConnectionOptions();
+
+  if (preferDirect && directUri) {
+    await mongoose.connect(directUri, connectionOptions);
+    console.log("MongoDB connected using direct URI");
+    return;
+  }
 
   if (srvUri) {
     try {

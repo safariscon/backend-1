@@ -6,6 +6,7 @@ const adminRoutes = require("./routes/adminRoutes");
 const bookingRoutes = require("./routes/bookingRoutes");
 const hotelRoutes = require("./routes/hotelRoutes");
 const publicRoutes = require("./routes/publicRoutes");
+const { getDbState, requireDatabase } = require("./middleware/databaseMiddleware");
 
 const app = express();
 
@@ -30,12 +31,19 @@ app.use(
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => {
+  const database = getDbState();
   res.json({
-    status: "ok",
+    status: database.ready ? "ok" : "degraded",
     service: "safariscon-api",
     time: new Date().toISOString(),
     environment: process.env.NODE_ENV || "development",
+    database,
   });
+});
+
+app.use("/api", (req, res, next) => {
+  if (req.path === "/health") return next();
+  return requireDatabase(req, res, next);
 });
 
 app.use("/api/auth", authRoutes);
