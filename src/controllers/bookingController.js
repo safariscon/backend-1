@@ -6,7 +6,7 @@ const { prefixedCode, secureToken } = require("../utils/secureIds");
 const { createPdfReceipt } = require("../utils/pdfReceipt");
 
 const publicFrontendUrl = () =>
-  String(process.env.PUBLIC_FRONTEND_URL || process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/+$/, "");
+  String(process.env.PUBLIC_FRONTEND_URL || process.env.FRONTEND_URL || "https://safariscon.vercel.app").replace(/\/+$/, "");
 
 const buildVerifyUrl = (token) => `${publicFrontendUrl()}/verify/${encodeURIComponent(token)}`;
 

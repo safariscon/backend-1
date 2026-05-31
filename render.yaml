@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: umuhuzaback
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CORS_ORIGINS
+        value: https://safariscon.vercel.app
+      - key: FRONTEND_URL
+        value: https://safariscon.vercel.app
+      - key: PUBLIC_FRONTEND_URL
+        value: https://safariscon.vercel.app
+      - key: PUBLIC_API_URL
+        value: https://umuhuzaback.onrender.com
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: CLOUDINARY_FOLDER
+        value: safariservconn

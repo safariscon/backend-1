@@ -11,7 +11,12 @@ const { getDbState, requireDatabase } = require("./middleware/databaseMiddleware
 const app = express();
 
 const parseOrigins = () =>
-  (process.env.CORS_ORIGINS || process.env.FRONTEND_URL || "http://localhost:5173")
+  (
+    process.env.CORS_ORIGINS ||
+    process.env.FRONTEND_URL ||
+    process.env.PUBLIC_FRONTEND_URL ||
+    "https://safariscon.vercel.app,http://localhost:5173,http://localhost:4173"
+  )
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean);
