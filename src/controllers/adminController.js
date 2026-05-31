@@ -5,6 +5,7 @@ const User = require("../models/User");
 const Supplier = require("../models/Supplier");
 const HotelService = require("../models/HotelService");
 const Transaction = require("../models/Transaction");
+const SiteSetting = require("../models/SiteSetting");
 const bcrypt = require("bcrypt");
 const { registerHotelByAdmin } = require("./authController");
 const { prefixedCode, secureToken } = require("../utils/secureIds");
@@ -14,6 +15,7 @@ const {
   emitRealtime,
   emitUserRealtime,
 } = require("../utils/realtime");
+const { clearCache } = require("../utils/cache");
 
 const registerHotel = registerHotelByAdmin;
 const registerBusiness = registerHotelByAdmin;
@@ -99,8 +101,16 @@ const updateBusinessVerification = async (req, res) => {
 
     const business = await Hotel.findByIdAndUpdate(
       businessId,
-      { $set: { approvalStatus } },
-      { new: true, runValidators: true }
+      {
+        $set: {
+          approvalStatus,
+          ...(approvalStatus === "approved" ? { status: "available" } : {}),
+        },
+        ...(approvalStatus === "approved"
+          ? { $max: { availableQuantity: 1, quantityRemaining: 1 } }
+          : {}),
+      },
+      { returnDocument: "after", runValidators: true }
     );
     if (!business) return res.status(404).json({ message: "Business not found." });
 
@@ -109,6 +119,7 @@ const updateBusinessVerification = async (req, res) => {
       businessId: business._id,
       approvalStatus,
     });
+    clearCache("public:");
 
     return res.json({
       message: approvalStatus === "approved" ? "Business posted publicly." : "Business review updated.",
@@ -119,17 +130,82 @@ const updateBusinessVerification = async (req, res) => {
   }
 };
 
+const updateAnnouncement = async (req, res) => {
+  try {
+    const text = String(req.body.text || "").trim();
+    const linkUrl = String(req.body.linkUrl || "").trim();
+    const linkLabel = String(req.body.linkLabel || "").trim();
+    const enabled = req.body.enabled !== false;
+
+    if (enabled && !text) {
+      return res.status(400).json({ message: "Announcement text is required when the bar is enabled." });
+    }
+
+    const setting = await SiteSetting.findOneAndUpdate(
+      { key: "announcement" },
+      {
+        $set: {
+          value: {
+            enabled,
+            text,
+            linkUrl,
+            linkLabel,
+          },
+        },
+      },
+      { upsert: true, returnDocument: "after", runValidators: true }
+    );
+
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "announcement-updated" });
+    return res.json({ message: "Announcement updated.", announcement: setting.value });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to update announcement.", error: error.message });
+  }
+};
+
 const approveBooking = async (req, res) => {
   try {
     const { bookingId } = req.params;
-    const booking = await Booking.findById(bookingId);
-    if (!booking) return res.status(404).json({ message: "Booking not found." });
-    if (booking.status === "confirmed") {
-      return res.status(400).json({ message: "Booking is already approved." });
+    const booking = await Booking.findOneAndUpdate(
+      {
+        _id: bookingId,
+        status: { $ne: "confirmed" },
+        isConnected: { $ne: true },
+      },
+      {
+        $set: {
+          status: "reviewing",
+          isAcknowledgedByAdmin: true,
+          acknowledgedAt: new Date(),
+          adminResponseMessage: "Admin is approving this booking.",
+        },
+      },
+      { returnDocument: "after", runValidators: true }
+    );
+    if (!booking) {
+      const existingBooking = await Booking.findById(bookingId).select("status isConnected");
+      if (existingBooking) {
+        return res.status(409).json({ message: "Booking is already approved or connected." });
+      }
+      return res.status(404).json({ message: "Booking not found." });
     }
 
     const businessId = req.body.businessId || booking.preferredHotelId || booking.hotelId;
     const quantity = Math.max(1, Number(req.body.quantity || booking.quantity || booking.guests || 1));
+    if (!businessId) {
+      await Booking.updateOne(
+        { _id: booking._id, status: "reviewing" },
+        {
+          $set: {
+            status: "pending",
+            isConnected: false,
+            adminResponseMessage: "Admin must select a business before this booking can be approved.",
+          },
+        }
+      );
+      return res.status(400).json({ message: "Select a business before approving this booking." });
+    }
+
     const business = await Hotel.findOneAndUpdate(
       {
         _id: businessId,
@@ -138,10 +214,21 @@ const approveBooking = async (req, res) => {
         quantityRemaining: { $gte: quantity },
       },
       { $inc: { quantityRemaining: -quantity, availableQuantity: -quantity } },
-      { new: true, runValidators: true }
+      { returnDocument: "after", runValidators: true }
     );
 
     if (!business) {
+      await Booking.updateOne(
+        { _id: booking._id, status: "reviewing" },
+        {
+          $set: {
+            status: "pending",
+            isConnected: false,
+            adminResponseMessage:
+              "Business is not approved, unavailable, or does not have enough quantity remaining.",
+          },
+        }
+      );
       return res.status(409).json({
         message: "Business is not approved, unavailable, or does not have enough quantity remaining.",
       });
@@ -162,6 +249,15 @@ const approveBooking = async (req, res) => {
       booking.verificationToken = secureToken([booking._id, booking.bookingCode, booking.touristId]);
     }
     await booking.save();
+
+    if (Number(business.quantityRemaining || 0) <= 0) {
+      business.status = "unavailable";
+      business.inventoryStatus = "fully-booked";
+      await business.save();
+    } else if (Number(business.quantityRemaining || 0) <= 3) {
+      business.inventoryStatus = "limited";
+      await business.save();
+    }
 
     emitUserRealtime(booking.touristId, REALTIME_EVENTS.BOOKING_CHANGED, {
       action: "confirmed",
@@ -416,7 +512,7 @@ const connectTour = async (req, res) => {
     const claimedRoom = await Room.findOneAndUpdate(
       { _id: roomId, hotelId: hotel._id, status: "available" },
       { $set: { status: "occupied" } },
-      { new: true, runValidators: true }
+      { returnDocument: "after", runValidators: true }
     );
 
     if (!claimedRoom) {
@@ -445,7 +541,7 @@ const connectTour = async (req, res) => {
           adminResponseMessage,
         },
       },
-      { new: true, runValidators: true }
+      { returnDocument: "after", runValidators: true }
     );
 
     if (!connectedBooking) {
@@ -735,14 +831,22 @@ const deleteUser = async (req, res) => {
       return res.status(400).json({ message: "Admin cannot delete own account." });
     }
 
-    if (targetUser.role === "hotel" && targetUser.hotelId) {
-      const hotel = await Hotel.findById(targetUser.hotelId);
-      if (hotel) {
+    if (targetUser.role === "hotel") {
+      const hotels = await Hotel.find({
+        $or: [
+          { ownerUserId: targetUser._id },
+          { ownerEmail: targetUser.email },
+          ...(targetUser.hotelId ? [{ _id: targetUser.hotelId }] : []),
+        ],
+      }).select("_id");
+      const hotelIds = hotels.map((hotel) => hotel._id);
+
+      if (hotelIds.length > 0) {
         await Promise.all([
-          User.deleteMany({ role: "hotel", hotelId: hotel._id }),
-          Room.deleteMany({ hotelId: hotel._id }),
+          Room.deleteMany({ hotelId: { $in: hotelIds } }),
+          HotelService.deleteMany({ hotelId: { $in: hotelIds } }),
           Booking.updateMany(
-            { hotelId: hotel._id },
+            { hotelId: { $in: hotelIds } },
             {
               $set: {
                 hotelId: null,
@@ -755,18 +859,17 @@ const deleteUser = async (req, res) => {
             }
           ),
         ]);
-        await Hotel.deleteOne({ _id: hotel._id });
+        await Hotel.deleteMany({ _id: { $in: hotelIds } });
         emitRealtime(REALTIME_EVENTS.HOTEL_CHANGED, {
           action: "deleted",
-          hotelId: hotel._id,
+          hotelIds,
         });
         emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "hotel-user-deleted" });
-      } else {
-        await User.deleteOne({ _id: targetUser._id });
       }
 
+      await User.deleteOne({ _id: targetUser._id });
       return res.json({
-        message: "Hotel user and linked hotel data deleted successfully.",
+        message: "Seller user and linked business data deleted successfully.",
       });
     }
 
@@ -795,6 +898,145 @@ const deleteUser = async (req, res) => {
   } catch (error) {
     return res.status(500).json({
       message: "Failed to delete user.",
+      error: error.message,
+    });
+  }
+};
+
+const findBookingForVerification = async (lookup, sellerFilter = null) => {
+  const query = {
+    $or: [
+      { _id: /^[a-f\d]{24}$/i.test(String(lookup)) ? lookup : undefined },
+      { bookingCode: lookup },
+      { verificationCode: lookup },
+      { verificationToken: lookup },
+      { paymentReference: lookup },
+    ].filter((item) => Object.values(item)[0] !== undefined),
+  };
+  if (sellerFilter) query.hotelId = sellerFilter;
+  return Booking.findOne(query)
+    .populate("touristId", "name email phone role")
+    .populate("preferredHotelId", "name location type sellerContactEmail ownerEmail")
+    .populate("hotelId", "name location type sellerContactEmail ownerEmail")
+    .populate("roomId", "roomNumber type price status")
+    .populate("tourHelpers", "name phone email");
+};
+
+const verifyBookingByLookup = async (req, res) => {
+  try {
+    const booking = await findBookingForVerification(req.params.lookup);
+    if (!booking) return res.status(404).json({ message: "Booking not found." });
+    return res.json({ booking });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to verify booking.", error: error.message });
+  }
+};
+
+const deleteUsers = async (req, res) => {
+  try {
+    const userIds = Array.isArray(req.body.userIds)
+      ? req.body.userIds.filter(Boolean)
+      : [];
+
+    if (userIds.length === 0) {
+      return res.status(400).json({ message: "Select at least one user to delete." });
+    }
+
+    if (userIds.some((userId) => String(userId) === String(req.user._id))) {
+      return res.status(400).json({ message: "Admin cannot delete own account." });
+    }
+
+    const results = [];
+    for (const userId of userIds) {
+      const targetUser = await User.findById(userId);
+      if (!targetUser) {
+        results.push({ userId, status: "not-found" });
+        continue;
+      }
+
+      if (targetUser.role === "hotel") {
+        const businessIds = await Hotel.find({
+          $or: [
+            { ownerUserId: targetUser._id },
+            { ownerEmail: targetUser.email },
+            ...(targetUser.hotelId ? [{ _id: targetUser.hotelId }] : []),
+          ],
+        }).select("_id");
+        const ids = businessIds.map((business) => business._id);
+        await Promise.all([
+          Hotel.deleteMany({ _id: { $in: ids } }),
+          Room.deleteMany({ hotelId: { $in: ids } }),
+          Booking.updateMany(
+            { hotelId: { $in: ids } },
+            {
+              $set: {
+                hotelId: null,
+                roomId: null,
+                isConnected: false,
+                status: "pending",
+                adminResponseMessage:
+                  "The assigned seller account was removed. Admin will reassign this booking.",
+              },
+            }
+          ),
+        ]);
+      }
+
+      if (["tourist", "customer"].includes(targetUser.role)) {
+        await Booking.deleteMany({ touristId: targetUser._id });
+      }
+
+      await User.deleteOne({ _id: targetUser._id });
+      results.push({ userId, status: "deleted" });
+    }
+
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "users-deleted" });
+    emitRealtime(REALTIME_EVENTS.BOOKING_CHANGED, { action: "users-deleted" });
+
+    return res.json({
+      message: `${results.filter((item) => item.status === "deleted").length} user(s) deleted.`,
+      results,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to delete selected users.",
+      error: error.message,
+    });
+  }
+};
+
+const deleteBusiness = async (req, res) => {
+  try {
+    const { businessId } = req.params;
+    const business = await Hotel.findById(businessId);
+    if (!business) {
+      return res.status(404).json({ message: "Business not found." });
+    }
+
+    await Promise.all([
+      Room.deleteMany({ hotelId: business._id }),
+      HotelService.deleteMany({ hotelId: business._id }),
+      Booking.updateMany(
+        { hotelId: business._id },
+        {
+          $set: {
+            hotelId: null,
+            roomId: null,
+            isConnected: false,
+            status: "pending",
+            adminResponseMessage:
+              "The assigned business was removed. Admin will reassign this booking.",
+          },
+        }
+      ),
+    ]);
+    await Hotel.deleteOne({ _id: business._id });
+
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "business-deleted" });
+    return res.json({ message: "Business deleted successfully." });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to delete business.",
       error: error.message,
     });
   }
@@ -901,10 +1143,14 @@ module.exports = {
   registerHotel,
   registerBusiness,
   createSeller,
+  updateAnnouncement,
   listServices,
   updateBusinessVerification,
   approveBooking,
+  verifyBookingByLookup,
   listTransactions,
+  deleteUsers,
+  deleteBusiness,
   getHotelStatus,
   connectTour,
   acknowledgeRequest,

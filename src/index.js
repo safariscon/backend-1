@@ -1,4 +1,24 @@
-require("dotenv").config({ quiet: true });
+const fs = require("fs");
+const path = require("path");
+const dotenv = require("dotenv");
+
+dotenv.config({ quiet: true });
+
+const envPath = path.resolve(__dirname, "../.env");
+if (fs.existsSync(envPath)) {
+  const parsedEnv = dotenv.parse(fs.readFileSync(envPath));
+  [
+    "MONGODB_URI",
+    "MONGODB_URI_DIRECT",
+    "MONGODB_PREFER_DIRECT",
+    "DNS_SERVERS",
+    "JWT_SECRET",
+    "ADMIN_EMAIL",
+    "ADMIN_PASSWORD",
+  ].forEach((key) => {
+    if (parsedEnv[key] !== undefined) process.env[key] = parsedEnv[key];
+  });
+}
 const http = require("http");
 const app = require("./app");
 const connectDB = require("./config/db");

@@ -295,10 +295,10 @@ const registerTourist = async (req, res) => {
         .json({ message: "name, email, password and role are required." });
     }
 
-    if (role !== "tourist") {
+    if (!["customer", "tourist"].includes(role)) {
       return res
         .status(400)
-        .json({ message: 'Only role "tourist" can self-register.' });
+        .json({ message: 'Only customer accounts can self-register.' });
     }
 
     const existing = await User.findOne({ email: email.toLowerCase().trim() });
@@ -311,7 +311,7 @@ const registerTourist = async (req, res) => {
       name: name.trim(),
       email: email.toLowerCase().trim(),
       password: hashedPassword,
-      role: "tourist",
+      role: "customer",
     });
 
     const token = generateToken(user);

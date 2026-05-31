@@ -15,6 +15,7 @@ const {
   normalizePriceModel,
   normalizeServiceSchedule,
 } = require("../services/marketplaceService");
+const { clearCache } = require("../utils/cache");
 
 const ensureHotelUser = (req, res) => {
   if (!["hotel", "supplier"].includes(req.user?.role)) {
@@ -31,6 +32,101 @@ const sellerBusinessFilter = (req) => ({
     ...(req.user.hotelId ? [{ _id: req.user.hotelId }] : []),
   ],
 });
+
+const normalizeAvailabilityTable = (table) => {
+  const rawColumns = Array.isArray(table?.columns) ? table.columns : [];
+  const columns = rawColumns
+    .map((column, index) => ({
+      id: String(column.id || `col_${index + 1}`).replace(/[^a-zA-Z0-9_-]/g, "_"),
+      label: String(column.label || column.name || `Column ${index + 1}`).trim(),
+    }))
+    .filter((column) => column.label)
+    .slice(0, 12);
+
+  const columnIds = new Set(columns.map((column) => column.id));
+  const rows = (Array.isArray(table?.rows) ? table.rows : [])
+    .map((row, rowIndex) => {
+      const rawCells = row?.cells && typeof row.cells === "object" ? row.cells : {};
+      const cells = {};
+      for (const column of columns) {
+        cells[column.id] = String(rawCells[column.id] ?? "").trim();
+      }
+      for (const [key, value] of Object.entries(rawCells)) {
+        if (columnIds.has(key)) cells[key] = String(value ?? "").trim();
+      }
+      return {
+        id: String(row.id || `row_${rowIndex + 1}`).replace(/[^a-zA-Z0-9_-]/g, "_"),
+        cells,
+      };
+    })
+    .slice(0, 100);
+
+  return {
+    columns,
+    rows,
+    updatedAt: columns.length || rows.length ? new Date() : null,
+  };
+};
+
+const normalizeBookingForm = (form) => {
+  const allowedTypes = new Set([
+    "text",
+    "textarea",
+    "number",
+    "email",
+    "tel",
+    "date",
+    "time",
+    "datetime-local",
+    "select",
+    "radio",
+    "checkbox",
+    "file",
+    "url",
+  ]);
+  const fields = (Array.isArray(form?.fields) ? form.fields : [])
+    .map((field, index) => {
+      const type = allowedTypes.has(field?.type) ? field.type : "text";
+      return {
+        id: String(field?.id || `field_${index + 1}`).replace(/[^a-zA-Z0-9_-]/g, "_"),
+        type,
+        label: String(field?.label || `Field ${index + 1}`).trim(),
+        placeholder: String(field?.placeholder || "").trim(),
+        helpText: String(field?.helpText || "").trim(),
+        defaultValue: field?.defaultValue ?? "",
+        required: Boolean(field?.required),
+        enabled: field?.enabled !== false,
+        validation: {
+          min: Number.isFinite(Number(field?.validation?.min)) ? Number(field.validation.min) : null,
+          max: Number.isFinite(Number(field?.validation?.max)) ? Number(field.validation.max) : null,
+          pattern: String(field?.validation?.pattern || "").trim(),
+          maxFileSizeMb: Math.min(25, Math.max(1, Number(field?.validation?.maxFileSizeMb || 5))),
+          acceptedFileTypes: String(field?.validation?.acceptedFileTypes || "").trim(),
+        },
+        options: Array.isArray(field?.options)
+          ? field.options.map((option) => String(option || "").trim()).filter(Boolean).slice(0, 50)
+          : [],
+      };
+    })
+    .filter((field) => field.label)
+    .slice(0, 80);
+
+  return {
+    title: String(form?.title || "").trim(),
+    description: String(form?.description || "").trim(),
+    isPublished: Boolean(form?.isPublished),
+    fields,
+    updatedAt: new Date(),
+  };
+};
+
+const resolveInventoryStatus = ({ status, quantity, requestedStatus }) => {
+  if (status === "unavailable") return "temporarily-unavailable";
+  if (requestedStatus) return requestedStatus;
+  if (quantity <= 0) return "out-of-stock";
+  if (quantity <= 3) return "limited";
+  return "available";
+};
 
 const getMyHotelOverview = async (req, res) => {
   try {
@@ -326,6 +422,24 @@ const updateBookingStatus = async (req, res) => {
       });
     }
 
+    if (status === "cancelled" && booking.hotelId) {
+      const quantity = Math.max(1, Number(booking.quantity || 1));
+      const business = await Hotel.findByIdAndUpdate(
+        booking.hotelId,
+        {
+          $inc: { quantityRemaining: quantity, availableQuantity: quantity },
+          $set: { status: "available", inventoryStatus: "available" },
+        },
+        { returnDocument: "after", runValidators: true }
+      );
+      if (business) {
+        emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, {
+          reason: "booking-cancelled-inventory-restored",
+          businessId: business._id,
+        });
+      }
+    }
+
     emitUserRealtime(booking.touristId, REALTIME_EVENTS.BOOKING_CHANGED, {
       action: "status-updated",
       bookingId: booking._id,
@@ -357,31 +471,61 @@ const upsertMyService = async (req, res) => {
     }
     const quantity = Math.max(0, Number(req.body.availableQuantity || req.body.quantityRemaining || 1));
     const amount = Number(req.body.pricing?.amount || req.body.price || 0);
-    const images = Array.isArray(req.body.images) ? req.body.images.filter(Boolean).slice(0, 6) : [];
+    const normalizedStatus = req.body.status === "unavailable" ? "unavailable" : "available";
+    const availabilityTable = normalizeAvailabilityTable(req.body.availabilityTable);
+    const bookingForm = normalizeBookingForm(req.body.bookingForm);
+    const inventoryStatus = resolveInventoryStatus({
+      status: normalizedStatus,
+      quantity,
+      requestedStatus: req.body.inventoryStatus,
+    });
+    const images = Array.isArray(req.body.images)
+      ? req.body.images
+          .filter((image) => /^https?:\/\//.test(String(image || "")))
+          .slice(0, 3)
+      : [];
 
     if (serviceId) {
+      const existingBusiness = await Hotel.findOne({ _id: serviceId, ...sellerBusinessFilter(req) }).select(
+        "approvalStatus"
+      );
+      if (!existingBusiness) {
+        return res.status(404).json({ message: "Business not found." });
+      }
+
       const business = await Hotel.findOneAndUpdate(
         { _id: serviceId, ...sellerBusinessFilter(req) },
         {
           $set: {
             name: title,
             type: String(category).trim(),
+            location: String(req.body.location || "Rwanda").trim(),
             description: String(description || "").trim(),
             basePrice: Number.isFinite(amount) ? amount : 0,
             priceText: String(req.body.priceText || "").trim(),
             images,
             services: [String(category).trim()],
-            status: req.body.status === "unavailable" ? "unavailable" : "available",
+            status: normalizedStatus,
             availableQuantity: quantity,
             quantityRemaining: quantity,
-            approvalStatus: "pending",
+            availabilityTable,
+            bookingForm,
+            inventoryStatus,
+            approvalStatus: existingBusiness.approvalStatus === "approved" ? "approved" : "pending",
           },
         },
-        { new: true, runValidators: true }
+        { returnDocument: "after", runValidators: true }
       );
       if (business) {
+        clearCache("public:");
         emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "seller-business-updated", hotelId: business._id });
-        return res.json({ message: "Business updated and sent for admin approval.", service: business });
+        return res.json({
+          message:
+            business.approvalStatus === "approved"
+              ? "Business updated and published automatically."
+              : "Business updated and sent for admin approval.",
+          service: business,
+        });
       }
     }
 
@@ -401,9 +545,12 @@ const upsertMyService = async (req, res) => {
       ownerUserId: req.user._id,
       supplierId: req.user.supplierId || null,
       approvalStatus: "pending",
-      status: req.body.status === "unavailable" ? "unavailable" : "available",
+      status: normalizedStatus,
       availableQuantity: quantity,
       quantityRemaining: quantity,
+      availabilityTable,
+      bookingForm,
+      inventoryStatus,
     });
 
     if (!req.user.hotelId) {
@@ -412,6 +559,7 @@ const upsertMyService = async (req, res) => {
     }
 
     emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "seller-business-created", hotelId: business._id });
+    clearCache("public:");
     return res.status(201).json({
       message: "Business created and sent for admin approval.",
       service: business,
@@ -439,7 +587,7 @@ const upsertMyService = async (req, res) => {
 
     const service = serviceId
       ? await HotelService.findOneAndUpdate({ _id: serviceId, hotelId }, payload, {
-          new: true,
+          returnDocument: "after",
           runValidators: true,
         })
       : await HotelService.create(payload);
@@ -478,6 +626,7 @@ const deleteService = async (req, res) => {
     const { serviceId } = req.params;
     const deletedBusiness = await Hotel.findOneAndDelete({ _id: serviceId, ...sellerBusinessFilter(req) });
     if (deletedBusiness) {
+      clearCache("public:");
       emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "seller-business-deleted", hotelId: deletedBusiness._id });
       return res.json({ message: "Business deleted successfully." });
     }
@@ -505,8 +654,40 @@ const deleteService = async (req, res) => {
   }
 };
 
+const verifyMyBooking = async (req, res) => {
+  try {
+    if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
+    const businesses = await Hotel.find(sellerBusinessFilter(req)).select("_id");
+    const businessIds = businesses.map((business) => business._id);
+    const lookup = String(req.params.lookup || "").trim();
+    const lookupConditions = [
+      /^[a-f\d]{24}$/i.test(lookup) ? { _id: lookup } : null,
+      { bookingCode: lookup },
+      { verificationCode: lookup },
+      { verificationToken: lookup },
+      { paymentReference: lookup },
+    ].filter(Boolean);
+
+    const booking = await Booking.findOne({
+      hotelId: { $in: businessIds },
+      $or: lookupConditions,
+    })
+      .populate("touristId", "name email phone role")
+      .populate("preferredHotelId", "name location type")
+      .populate("hotelId", "name location type")
+      .populate("roomId", "roomNumber type price status");
+
+    if (!booking) return res.status(404).json({ message: "Booking not found for your business." });
+    return res.json({ booking });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to verify booking.", error: error.message });
+  }
+};
+
+const getMyHotelOverviewExport = getMyHotelOverview;
+
 module.exports = {
-  getMyHotelOverview,
+  getMyHotelOverview: getMyHotelOverviewExport,
   listMyBookings,
   listMyRooms,
   listMyServices,
@@ -516,4 +697,5 @@ module.exports = {
   upsertMyService,
   deleteService,
   deleteRoom,
+  verifyMyBooking,
 };

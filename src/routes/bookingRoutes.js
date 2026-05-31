@@ -5,13 +5,13 @@ const {
   payBooking,
   downloadReceipt,
 } = require("../controllers/bookingController");
-const { protect, touristOnly } = require("../middleware/authMiddleware");
+const { protect, customerOnly } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
-router.post("/request", protect, touristOnly, createBookingRequest);
-router.get("/my", protect, touristOnly, listMyBookings);
-router.post("/:bookingId/pay", protect, touristOnly, payBooking);
-router.get("/:bookingId/receipt", protect, touristOnly, downloadReceipt);
+router.post("/request", protect, customerOnly, createBookingRequest);
+router.get("/my", protect, customerOnly, listMyBookings);
+router.post("/:bookingId/pay", protect, customerOnly, payBooking);
+router.get("/:bookingId/receipt", protect, customerOnly, downloadReceipt);
 
 module.exports = router;

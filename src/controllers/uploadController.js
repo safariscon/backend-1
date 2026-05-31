@@ -50,6 +50,34 @@ const uploadImage = async (req, res) => {
   }
 };
 
+const uploadImages = async (req, res) => {
+  try {
+    const files = Array.isArray(req.files) ? req.files.slice(0, 3) : [];
+    if (files.length === 0) {
+      return res.status(400).json({ message: "At least one image file is required." });
+    }
+
+    const results = await Promise.all(files.map((file) => uploadBufferToCloudinary(file)));
+
+    return res.status(201).json({
+      urls: results.map((result) => result.secure_url),
+      images: results.map((result) => ({
+        url: result.secure_url,
+        publicId: result.public_id,
+        width: result.width,
+        height: result.height,
+        format: result.format,
+      })),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Image upload failed.",
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   uploadImage,
+  uploadImages,
 };

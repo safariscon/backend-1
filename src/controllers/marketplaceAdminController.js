@@ -164,7 +164,7 @@ const upsertHotelServiceByAdmin = async (req, res) => {
 
     const service = serviceId
       ? await HotelService.findByIdAndUpdate(serviceId, servicePayload, {
-          new: true,
+          returnDocument: "after",
           runValidators: true,
         })
       : await HotelService.create(servicePayload);
@@ -269,7 +269,7 @@ const createCompositeBooking = async (req, res) => {
           "availabilitySchedule.inventory": { $gte: quantity },
         },
         { $inc: { "availabilitySchedule.inventory": -quantity } },
-        { new: true, runValidators: true }
+        { returnDocument: "after", runValidators: true }
       );
 
       if (!updatedService) {

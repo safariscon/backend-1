@@ -56,7 +56,7 @@ const PRICING_UNITS = ["hour", "day", "person", "event", "night", "use"];
 
 const VERIFICATION_STATUSES = ["draft", "pending", "verified", "rejected"];
 
-const BOOKING_STATUSES = ["pending", "confirmed", "cancelled", "completed"];
+const BOOKING_STATUSES = ["pending", "reviewing", "confirmed", "cancelled", "completed"];
 
 const BOOKING_ITEM_TYPES = ["room", "service", "transport", "experience", "retail"];
 

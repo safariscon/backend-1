@@ -62,6 +62,36 @@ const hotelServiceSchema = new mongoose.Schema(
       type: [String],
       default: [],
     },
+    availabilityTable: {
+      columns: {
+        type: [
+          {
+            id: { type: String, required: true, trim: true },
+            label: { type: String, required: true, trim: true },
+          },
+        ],
+        default: [],
+      },
+      rows: {
+        type: [
+          {
+            id: { type: String, required: true, trim: true },
+            cells: { type: mongoose.Schema.Types.Mixed, default: {} },
+          },
+        ],
+        default: [],
+      },
+      updatedAt: {
+        type: Date,
+        default: null,
+      },
+    },
+    inventoryStatus: {
+      type: String,
+      enum: ["available", "limited", "fully-booked", "out-of-stock", "temporarily-unavailable"],
+      default: "available",
+      index: true,
+    },
     approvalStatus: {
       type: String,
       enum: ["draft", "pending", "approved", "rejected"],

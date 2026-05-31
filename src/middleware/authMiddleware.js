@@ -33,11 +33,9 @@ const adminOnly = (req, res, next) => {
   next();
 };
 
-const touristOnly = (req, res, next) => {
-  if (!req.user || req.user.role !== "tourist") {
-    return res
-      .status(403)
-      .json({ message: "Forbidden: tourist role required." });
+const customerOnly = (req, res, next) => {
+  if (!req.user || !["tourist", "customer"].includes(req.user.role)) {
+    return res.status(403).json({ message: "Forbidden: customer account required." });
   }
   next();
 };
@@ -56,4 +54,4 @@ const supplierOnly = (req, res, next) => {
   next();
 };
 
-module.exports = { protect, adminOnly, touristOnly, hotelOnly, supplierOnly };
+module.exports = { protect, adminOnly, customerOnly, hotelOnly, supplierOnly };

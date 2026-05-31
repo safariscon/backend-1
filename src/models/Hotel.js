@@ -97,6 +97,116 @@ const hotelSchema = new mongoose.Schema(
       default: "",
       trim: true,
     },
+    availabilityTable: {
+      columns: {
+        type: [
+          {
+            id: {
+              type: String,
+              required: true,
+              trim: true,
+            },
+            label: {
+              type: String,
+              required: true,
+              trim: true,
+            },
+          },
+        ],
+        default: [],
+      },
+      rows: {
+        type: [
+          {
+            id: {
+              type: String,
+              required: true,
+              trim: true,
+            },
+            cells: {
+              type: mongoose.Schema.Types.Mixed,
+              default: {},
+            },
+          },
+        ],
+        default: [],
+      },
+      updatedAt: {
+        type: Date,
+        default: null,
+      },
+    },
+    bookingForm: {
+      title: {
+        type: String,
+        default: "",
+        trim: true,
+      },
+      description: {
+        type: String,
+        default: "",
+        trim: true,
+      },
+      isPublished: {
+        type: Boolean,
+        default: false,
+        index: true,
+      },
+      fields: {
+        type: [
+          {
+            id: { type: String, required: true, trim: true },
+            type: {
+              type: String,
+              enum: [
+                "text",
+                "textarea",
+                "number",
+                "email",
+                "tel",
+                "date",
+                "time",
+                "datetime-local",
+                "select",
+                "radio",
+                "checkbox",
+                "file",
+                "url",
+              ],
+              default: "text",
+            },
+            label: { type: String, required: true, trim: true },
+            placeholder: { type: String, default: "", trim: true },
+            helpText: { type: String, default: "", trim: true },
+            defaultValue: { type: mongoose.Schema.Types.Mixed, default: "" },
+            required: { type: Boolean, default: false },
+            enabled: { type: Boolean, default: true },
+            validation: {
+              min: { type: Number, default: null },
+              max: { type: Number, default: null },
+              pattern: { type: String, default: "", trim: true },
+              maxFileSizeMb: { type: Number, default: 5 },
+              acceptedFileTypes: { type: String, default: "", trim: true },
+            },
+            options: {
+              type: [String],
+              default: [],
+            },
+          },
+        ],
+        default: [],
+      },
+      updatedAt: {
+        type: Date,
+        default: null,
+      },
+    },
+    inventoryStatus: {
+      type: String,
+      enum: ["available", "limited", "fully-booked", "out-of-stock", "temporarily-unavailable"],
+      default: "available",
+      index: true,
+    },
     bookingRules: {
       minStay: {
         type: Number,

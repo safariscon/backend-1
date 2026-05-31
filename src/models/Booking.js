@@ -177,6 +177,23 @@ const bookingSchema = new mongoose.Schema(
       default: "",
       trim: true,
     },
+    receipt: {
+      receiptNumber: {
+        type: String,
+        default: "",
+        trim: true,
+        index: true,
+      },
+      generatedAt: {
+        type: Date,
+        default: null,
+      },
+      contentType: {
+        type: String,
+        default: "",
+        trim: true,
+      },
+    },
     checkIn: {
       type: Date,
       default: null,
@@ -189,6 +206,10 @@ const bookingSchema = new mongoose.Schema(
       type: Number,
       default: 1,
       min: 1,
+    },
+    bookingDetails: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
     },
     status: {
       type: String,
