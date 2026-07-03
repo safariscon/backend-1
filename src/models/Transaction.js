@@ -47,6 +47,12 @@ const transactionSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    commissionStatus: {
+      type: String,
+      enum: ["pending", "collected", "waived"],
+      default: "pending",
+      index: true,
+    },
     sellerEarnings: {
       type: Number,
       default: 0,
@@ -54,7 +60,7 @@ const transactionSchema = new mongoose.Schema(
     },
     paymentMethod: {
       type: String,
-      enum: ["mobile-money", "card", "bank-transfer", "cash", "placeholder"],
+      enum: ["mobile-money", "card", "bank-transfer", "cash", "placeholder", "simulation-mobile-money", "simulation-card"],
       default: "placeholder",
     },
     senderAccount: {

@@ -38,8 +38,52 @@ const hotelSchema = new mongoose.Schema(
       default: "",
       trim: true,
     },
+    locationDetails: {
+      district: { type: String, default: "", trim: true, index: true },
+      sector: { type: String, default: "", trim: true },
+      cell: { type: String, default: "", trim: true },
+      village: { type: String, default: "", trim: true },
+    },
+    contactDetails: {
+      phone: { type: String, default: "", trim: true },
+      whatsapp: { type: String, default: "", trim: true },
+      email: { type: String, default: "", trim: true, lowercase: true },
+      exactAddress: { type: String, default: "", trim: true },
+      googleMapsUrl: { type: String, default: "", trim: true },
+      latitude: { type: Number, default: null },
+      longitude: { type: Number, default: null },
+      website: { type: String, default: "", trim: true },
+      facebook: { type: String, default: "", trim: true },
+      instagram: { type: String, default: "", trim: true },
+      x: { type: String, default: "", trim: true },
+      tiktok: { type: String, default: "", trim: true },
+      registrationDetails: { type: String, default: "", trim: true },
+    },
     images: {
       type: [String],
+      default: [],
+      validate: {
+        validator: (images) => Array.isArray(images) && images.length <= 3,
+        message: "A service can have no more than 3 images.",
+      },
+    },
+    promotion: {
+      enabled: { type: Boolean, default: false, index: true },
+      title: { type: String, default: "", trim: true, maxlength: 100 },
+      description: { type: String, default: "", trim: true, maxlength: 500 },
+      startAt: { type: Date, default: null },
+      endAt: { type: Date, default: null },
+    },
+    promotionHistory: {
+      type: [
+        {
+          title: { type: String, default: "", trim: true },
+          description: { type: String, default: "", trim: true },
+          startAt: { type: Date, default: null },
+          endAt: { type: Date, default: null },
+          recordedAt: { type: Date, default: Date.now },
+        },
+      ],
       default: [],
     },
     services: {
@@ -97,6 +141,18 @@ const hotelSchema = new mongoose.Schema(
       default: "",
       trim: true,
     },
+    commissionPercentage: {
+      type: Number,
+      default: 10,
+      min: 0,
+      max: 100,
+    },
+    payoutDetails: {
+      method: { type: String, default: "mobile-money", trim: true },
+      accountName: { type: String, default: "", trim: true },
+      accountNumber: { type: String, default: "", trim: true },
+      instructions: { type: String, default: "", trim: true },
+    },
     availabilityTable: {
       columns: {
         type: [
@@ -135,6 +191,12 @@ const hotelSchema = new mongoose.Schema(
         type: Date,
         default: null,
       },
+    },
+    bookingMode: {
+      type: String,
+      enum: ["manual", "automatic"],
+      default: "manual",
+      index: true,
     },
     bookingForm: {
       title: {

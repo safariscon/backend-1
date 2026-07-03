@@ -4,7 +4,8 @@ const Hotel = require("../models/Hotel");
 const Room = require("../models/Room");
 const Supplier = require("../models/Supplier");
 const { generateToken, buildUserPayload } = require("../utils/auth");
-const { sendHotelCredentialsEmail } = require("../utils/notify");
+const { prefixedCode } = require("../utils/secureIds");
+const { sendProviderOnboardingEmail } = require("../utils/notify");
 const { REALTIME_EVENTS, emitRealtime } = require("../utils/realtime");
 
 const BUSINESS_TYPE_CONFIG = {
@@ -260,10 +261,9 @@ const login = async (req, res) => {
     if (!user) {
       return res.status(401).json({ message: "Invalid credentials." });
     }
-    if (user.role === "hotel" && user.mustSetPassword) {
+    if (["hotel", "supplier"].includes(user.role) && user.mustSetPassword) {
       return res.status(403).json({
-        message:
-          "Hotel account must complete registration first. Use hotel complete-registration.",
+        message: "Provider account must complete onboarding before login.",
       });
     }
     if (!user.password) {
@@ -326,32 +326,31 @@ const registerTourist = async (req, res) => {
   }
 };
 
-const registerHotelByAdmin = async (req, res) => {
+const registerBusinessByAdmin = async (req, res) => {
   try {
     const {
       businessName,
       businessType,
       contactInfo,
+      contactDetails,
       images,
       services,
-      hotelName,
       location,
       description,
       basePrice,
       amenities,
-      ownerEmail,
-      hotelEmail,
-      ownerName,
+      providerEmail,
+      providerName,
     } = req.body;
 
-    const normalizedBusinessName = (businessName || hotelName || "").trim();
+    const normalizedBusinessName = (businessName || "").trim();
     const normalizedBusinessType = normalizeBusinessType(businessType);
     const normalizedLocation = location?.trim();
-    const normalizedOwnerName = (ownerName || "").trim();
-    const normalizedEmail = (ownerEmail || hotelEmail || "").toLowerCase().trim();
+    const normalizedOwnerName = (providerName || "").trim();
+    const normalizedEmail = (providerEmail || "").toLowerCase().trim();
     const normalizedDescription = (description || "").trim();
     const normalizedContactInfo = String(contactInfo || normalizedEmail || "").trim();
-    const normalizedImages = parseStringList(images);
+    const normalizedImages = parseStringList(images).slice(0, 3);
     const normalizedServices = parseStringList(services);
     const parsedBasePrice = Number(basePrice || 0);
     const businessConfig =
@@ -405,7 +404,7 @@ const registerHotelByAdmin = async (req, res) => {
         model: {
           type: "fixed",
           amount: parsedBasePrice,
-          currency: "USD",
+          currency: "RWF",
           unit: businessConfig.defaultUnit,
         },
       },
@@ -423,6 +422,11 @@ const registerHotelByAdmin = async (req, res) => {
       basePrice: parsedBasePrice,
       amenities: Array.isArray(amenities) ? amenities : [],
       contactInfo: normalizedContactInfo,
+      contactDetails: {
+        ...(contactDetails && typeof contactDetails === "object" ? contactDetails : {}),
+        phone: contactDetails?.phone || normalizedContactInfo,
+        email: contactDetails?.email || normalizedEmail,
+      },
       images: normalizedImages,
       services: normalizedServices,
       supplierId: supplier._id,
@@ -433,17 +437,18 @@ const registerHotelByAdmin = async (req, res) => {
     await supplier.save();
 
     let owner = null;
+    let onboardingCredentials = null;
     if (normalizedEmail && normalizedOwnerName) {
-      const temporaryHash = await bcrypt.hash(
-        `${Date.now()}-${normalizedEmail}-temporary`,
-        10
-      );
+      const sellerId = prefixedCode("SELLER", 8);
+      const generatedPassword = prefixedCode("SCN", 14);
+      const temporaryHash = await bcrypt.hash(generatedPassword, 12);
 
       owner = await User.create({
         name: normalizedOwnerName,
         email: normalizedEmail,
         password: temporaryHash,
         role: "hotel",
+        sellerId,
         hotelId: hotel._id,
         supplierId: supplier._id,
         mustSetPassword: true,
@@ -452,10 +457,17 @@ const registerHotelByAdmin = async (req, res) => {
       supplier.ownerUserId = owner._id;
       await supplier.save();
 
-      await sendHotelCredentialsEmail({
-        hotelEmail: normalizedEmail,
-        hotelName: hotel.name,
-        ownerName: normalizedOwnerName,
+      onboardingCredentials = {
+        providerName: normalizedOwnerName,
+        providerEmail: normalizedEmail,
+        sellerId,
+        generatedPassword,
+      };
+
+      await sendProviderOnboardingEmail({
+        providerEmail: normalizedEmail,
+        businessName: hotel.name,
+        providerName: normalizedOwnerName,
       });
     }
 
@@ -479,12 +491,13 @@ const registerHotelByAdmin = async (req, res) => {
     return res.status(201).json({
       hotel,
       business: hotel,
-      ownerEmail: owner ? normalizedEmail : "",
-      ownerName: owner ? normalizedOwnerName : "",
-      registrationPath: owner ? "/hotel-register" : "",
+      providerEmail: owner ? normalizedEmail : "",
+      providerName: owner ? normalizedOwnerName : "",
+      registrationPath: owner ? "/provider-register" : "",
+      credentials: onboardingCredentials,
       message:
         owner
-          ? "Business registered by admin. Owner must complete registration to set password."
+          ? "Business registered by admin. The provider must complete registration to set a password."
           : "Business registered by admin successfully.",
     });
   } catch (error) {
@@ -494,37 +507,67 @@ const registerHotelByAdmin = async (req, res) => {
   }
 };
 
-const completeHotelRegistration = async (req, res) => {
+const completeProviderRegistration = async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const {
+      providerName,
+      providerEmail,
+      sellerId,
+      generatedPassword,
+      newPassword,
+    } = req.body;
 
-    if (!name || !email || !password) {
+    if (
+      !providerName ||
+      !providerEmail ||
+      !sellerId ||
+      !generatedPassword ||
+      !newPassword
+    ) {
       return res
         .status(400)
-        .json({ message: "name, email and password are required." });
+        .json({
+          message:
+            "Provider name, provider email, seller ID, generated password, and new password are required.",
+        });
     }
 
-    const normalizedEmail = email.toLowerCase().trim();
+    if (String(newPassword).length < 8) {
+      return res.status(400).json({
+        message: "New password must be at least 8 characters long.",
+      });
+    }
+
+    const normalizedEmail = String(providerEmail).toLowerCase().trim();
+    const normalizedSellerId = String(sellerId).toUpperCase().trim();
     const user = await User.findOne({
       email: normalizedEmail,
-      role: "hotel",
+      sellerId: normalizedSellerId,
+      role: { $in: ["hotel", "supplier"] },
       mustSetPassword: true,
     });
 
     if (!user) {
       return res.status(404).json({
-        message:
-          "Hotel onboarding account not found. Ask admin to register your hotel email first.",
+        message: "Provider onboarding account not found. Check the credentials supplied by the admin.",
       });
     }
 
-    if (user.name.trim().toLowerCase() !== name.trim().toLowerCase()) {
+    if (user.name.trim().toLowerCase() !== String(providerName).trim().toLowerCase()) {
       return res
         .status(400)
-        .json({ message: "Provided name does not match admin-registered owner name." });
+        .json({ message: "Provider name does not match the admin-created account." });
     }
 
-    user.password = await bcrypt.hash(password, 10);
+    const generatedPasswordMatches = await bcrypt.compare(
+      String(generatedPassword),
+      user.password
+    );
+    if (!generatedPasswordMatches) {
+      return res.status(401).json({ message: "Generated password is incorrect." });
+    }
+
+    user.password = await bcrypt.hash(String(newPassword), 12);
     user.mustSetPassword = false;
     await user.save();
 
@@ -532,11 +575,11 @@ const completeHotelRegistration = async (req, res) => {
     return res.json({
       user: await buildAuthUserPayload(user),
       token,
-      message: "Hotel registration completed. You can now login.",
+      message: "Provider registration completed. You can now login.",
     });
   } catch (error) {
     return res.status(500).json({
-      message: "Failed to complete hotel registration.",
+      message: "Failed to complete provider registration.",
       error: error.message,
     });
   }
@@ -545,6 +588,6 @@ const completeHotelRegistration = async (req, res) => {
 module.exports = {
   login,
   registerTourist,
-  registerHotelByAdmin,
-  completeHotelRegistration,
+  registerBusinessByAdmin,
+  completeProviderRegistration,
 };

@@ -1,12 +1,12 @@
-const sendHotelCredentialsEmail = async ({
-  hotelEmail,
-  hotelName,
-  ownerName,
+const sendProviderOnboardingEmail = async ({
+  providerEmail,
+  businessName,
+  providerName,
 }) => {
   // Placeholder email integration.
   console.log(
-    `[EMAIL SIMULATION] Sent onboarding email to ${hotelEmail} for hotel "${hotelName}" owner "${ownerName}". Owner must complete registration to set password.`
+    `[EMAIL SIMULATION] Sent onboarding email to ${providerEmail} for business "${businessName}" and provider "${providerName}". The provider must complete registration to set a password.`
   );
 };
 
-module.exports = { sendHotelCredentialsEmail };
+module.exports = { sendProviderOnboardingEmail };

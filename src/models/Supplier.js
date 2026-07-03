@@ -92,7 +92,7 @@ const supplierSchema = new mongoose.Schema(
         },
         currency: {
           type: String,
-          default: "USD",
+          default: "RWF",
           trim: true,
         },
         unit: {

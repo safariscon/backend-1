@@ -19,6 +19,11 @@ const bookingSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
+    anonymousBusinessName: {
+      type: String,
+      default: "",
+      trim: true,
+    },
     destinationPlace: {
       type: String,
       required: true,
@@ -143,9 +148,36 @@ const bookingSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    depositPercentage: {
+      type: Number,
+      default: 30,
+      min: 0,
+      max: 100,
+    },
+    depositAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    remainingBalance: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    commissionPercentage: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 100,
+    },
+    commissionAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     paymentStatus: {
       type: String,
-      enum: ["unpaid", "pending", "paid", "failed", "refunded"],
+      enum: ["unpaid", "pending", "deposit-paid", "paid", "failed", "refunded"],
       default: "unpaid",
       index: true,
     },
@@ -193,6 +225,18 @@ const bookingSchema = new mongoose.Schema(
         default: "",
         trim: true,
       },
+      cloudinaryUrl: { type: String, default: "", trim: true },
+      cloudinaryPublicId: { type: String, default: "", trim: true },
+      cloudinaryResourceType: { type: String, default: "", trim: true },
+      cloudinaryDeliveryType: { type: String, default: "", trim: true },
+      cloudinaryFormat: { type: String, default: "pdf", trim: true },
+      bytes: { type: Number, default: 0, min: 0 },
+      storageStatus: {
+        type: String,
+        enum: ["pending", "stored", "failed"],
+        default: "pending",
+      },
+      storedAt: { type: Date, default: null },
     },
     checkIn: {
       type: Date,
@@ -210,6 +254,37 @@ const bookingSchema = new mongoose.Schema(
     bookingDetails: {
       type: mongoose.Schema.Types.Mixed,
       default: {},
+    },
+    bookingMode: {
+      type: String,
+      enum: ["manual", "automatic"],
+      default: "manual",
+      index: true,
+    },
+    serviceOptionId: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    priceSnapshot: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    availabilityReservation: {
+      status: {
+        type: String,
+        enum: ["none", "reserved", "paid", "released", "expired"],
+        default: "none",
+      },
+      quantity: { type: Number, default: 0, min: 0 },
+      expiresAt: { type: Date, default: null },
+    },
+    promotionSnapshot: {
+      title: { type: String, default: "", trim: true },
+      description: { type: String, default: "", trim: true },
+      startAt: { type: Date, default: null },
+      endAt: { type: Date, default: null },
+      appliedAt: { type: Date, default: null },
     },
     status: {
       type: String,
@@ -257,6 +332,12 @@ const bookingSchema = new mongoose.Schema(
       default: "",
       trim: true,
     },
+    paymentReason: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 500,
+    },
     isAcknowledgedByAdmin: {
       type: Boolean,
       default: false,
@@ -265,6 +346,18 @@ const bookingSchema = new mongoose.Schema(
     acknowledgedAt: {
       type: Date,
       default: null,
+    },
+    originalBookingId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Booking",
+      default: null,
+      index: true,
+    },
+    rebookRequestId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "RebookRequest",
+      default: null,
+      index: true,
     },
   },
   { timestamps: true }
@@ -275,5 +368,6 @@ bookingSchema.index({ hotelId: 1, status: 1, createdAt: -1 });
 bookingSchema.index({ touristId: 1, createdAt: -1 });
 bookingSchema.index({ "items.serviceId": 1, status: 1 });
 bookingSchema.index({ bookingCode: 1, verificationToken: 1 });
+bookingSchema.index({ originalBookingId: 1, rebookRequestId: 1 });
 
 module.exports = mongoose.model("Booking", bookingSchema);

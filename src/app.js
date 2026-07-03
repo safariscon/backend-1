@@ -4,22 +4,33 @@ const helmet = require("helmet");
 const authRoutes = require("./routes/authRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const bookingRoutes = require("./routes/bookingRoutes");
+const rebookRoutes = require("./routes/rebookRoutes");
 const hotelRoutes = require("./routes/hotelRoutes");
 const publicRoutes = require("./routes/publicRoutes");
+const analyticsRoutes = require("./routes/analyticsRoutes");
 const { getDbState, requireDatabase } = require("./middleware/databaseMiddleware");
 
 const app = express();
 
-const parseOrigins = () =>
-  (
+const parseOrigins = () => {
+  const configuredOrigins = (
     process.env.CORS_ORIGINS ||
     process.env.FRONTEND_URL ||
     process.env.PUBLIC_FRONTEND_URL ||
-    "https://safariscon.vercel.app,http://localhost:5173,http://localhost:4173"
+    ""
   )
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean);
+
+  return [...new Set([
+    ...configuredOrigins,
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+  ])];
+};
 
 const allowedOrigins = parseOrigins();
 
@@ -52,8 +63,10 @@ app.use("/api", (req, res, next) => {
 });
 
 app.use("/api/auth", authRoutes);
+app.use("/api/analytics", analyticsRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/bookings", bookingRoutes);
+app.use("/api/rebook", rebookRoutes);
 app.use("/api/hotel", hotelRoutes);
 app.use("/api", publicRoutes);
 

@@ -51,7 +51,7 @@ const normalizeCommission = (commission = {}) => ({
 const normalizePriceModel = (value = {}) => ({
   type: PRICE_MODELS.includes(value.type) ? value.type : "fixed",
   amount: Math.max(0, toNumber(value.amount, 0)),
-  currency: String(value.currency || "USD").trim().toUpperCase(),
+  currency: "RWF",
   unit: PRICING_UNITS.includes(value.unit) ? value.unit : "use",
 });
 

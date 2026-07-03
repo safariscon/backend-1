@@ -6,8 +6,10 @@ const Supplier = require("../models/Supplier");
 const HotelService = require("../models/HotelService");
 const Transaction = require("../models/Transaction");
 const SiteSetting = require("../models/SiteSetting");
+const AuditLog = require("../models/AuditLog");
+const { normalizePriceOption, hasCompleteAutomaticRules, getAutomaticRuleDefaults } = require("../services/automaticBookingService");
 const bcrypt = require("bcrypt");
-const { registerHotelByAdmin } = require("./authController");
+const { registerBusinessByAdmin } = require("./authController");
 const { prefixedCode, secureToken } = require("../utils/secureIds");
 const {
   REALTIME_EVENTS,
@@ -17,15 +19,14 @@ const {
 } = require("../utils/realtime");
 const { clearCache } = require("../utils/cache");
 
-const registerHotel = registerHotelByAdmin;
-const registerBusiness = registerHotelByAdmin;
+const registerBusiness = registerBusinessByAdmin;
 
 const createSeller = async (req, res) => {
   try {
-    const name = String(req.body.name || req.body.fullName || "").trim();
-    const email = String(req.body.email || "").toLowerCase().trim();
+    const name = String(req.body.providerName || "").trim();
+    const email = String(req.body.providerEmail || "").toLowerCase().trim();
     if (!name || !email) {
-      return res.status(400).json({ message: "Seller full name and email are required." });
+      return res.status(400).json({ message: "Provider name and email are required." });
     }
 
     const existing = await User.findOne({ email });
@@ -43,11 +44,11 @@ const createSeller = async (req, res) => {
       password: hashedPassword,
       role: "hotel",
       sellerId,
-      mustSetPassword: false,
+      mustSetPassword: true,
     });
 
     return res.status(201).json({
-      message: "Seller account created successfully.",
+      message: "Provider account created successfully.",
       seller: {
         id: user._id,
         name: user.name,
@@ -56,10 +57,10 @@ const createSeller = async (req, res) => {
         sellerId,
       },
       credentials: {
-        fullName: name,
-        email,
+        providerName: name,
+        providerEmail: email,
         sellerId,
-        password: generatedPassword,
+        generatedPassword,
       },
     });
   } catch (error) {
@@ -132,13 +133,22 @@ const updateBusinessVerification = async (req, res) => {
 
 const updateAnnouncement = async (req, res) => {
   try {
-    const text = String(req.body.text || "").trim();
-    const linkUrl = String(req.body.linkUrl || "").trim();
-    const linkLabel = String(req.body.linkLabel || "").trim();
     const enabled = req.body.enabled !== false;
+    const intervalSeconds = Math.max(1, Math.min(3600, Number(req.body.intervalSeconds) || 5));
+    const submittedItems = Array.isArray(req.body.items)
+      ? req.body.items
+      : [{ text: req.body.text, linkUrl: req.body.linkUrl, linkLabel: req.body.linkLabel }];
+    const items = submittedItems
+      .slice(0, 5)
+      .map((item) => ({
+        text: String(item?.text || "").trim(),
+        linkUrl: String(item?.linkUrl || "").trim(),
+        linkLabel: String(item?.linkLabel || "").trim(),
+      }))
+      .filter((item) => item.text);
 
-    if (enabled && !text) {
-      return res.status(400).json({ message: "Announcement text is required when the bar is enabled." });
+    if (enabled && !items.length) {
+      return res.status(400).json({ message: "Add at least one announcement when the bar is enabled." });
     }
 
     const setting = await SiteSetting.findOneAndUpdate(
@@ -147,9 +157,8 @@ const updateAnnouncement = async (req, res) => {
         $set: {
           value: {
             enabled,
-            text,
-            linkUrl,
-            linkLabel,
+            intervalSeconds,
+            items,
           },
         },
       },
@@ -157,7 +166,7 @@ const updateAnnouncement = async (req, res) => {
     );
 
     emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "announcement-updated" });
-    return res.json({ message: "Announcement updated.", announcement: setting.value });
+    return res.json({ message: `${items.length} announcement(s) updated.`, announcement: setting.value });
   } catch (error) {
     return res.status(500).json({ message: "Failed to update announcement.", error: error.message });
   }
@@ -166,6 +175,17 @@ const updateAnnouncement = async (req, res) => {
 const approveBooking = async (req, res) => {
   try {
     const { bookingId } = req.params;
+    const quotedTotal = Number(req.body.totalPrice);
+    const paymentReason = String(req.body.paymentReason || "").trim();
+    if (!Number.isFinite(quotedTotal) || quotedTotal <= 0) {
+      return res.status(400).json({ message: "Enter the exact quoted service price in RWF before approval." });
+    }
+    if (!paymentReason) {
+      return res.status(400).json({ message: "Enter the reason or purpose for the customer payment before approval." });
+    }
+    if (paymentReason.length > 500) {
+      return res.status(400).json({ message: "Payment reason must be 500 characters or fewer." });
+    }
     const booking = await Booking.findOneAndUpdate(
       {
         _id: bookingId,
@@ -206,16 +226,11 @@ const approveBooking = async (req, res) => {
       return res.status(400).json({ message: "Select a business before approving this booking." });
     }
 
-    const business = await Hotel.findOneAndUpdate(
-      {
-        _id: businessId,
-        approvalStatus: "approved",
-        status: "available",
-        quantityRemaining: { $gte: quantity },
-      },
-      { $inc: { quantityRemaining: -quantity, availableQuantity: -quantity } },
-      { returnDocument: "after", runValidators: true }
-    );
+    const business = await Hotel.findOne({
+      _id: businessId,
+      approvalStatus: "approved",
+      status: "available",
+    });
 
     if (!business) {
       await Booking.updateOne(
@@ -224,13 +239,12 @@ const approveBooking = async (req, res) => {
           $set: {
             status: "pending",
             isConnected: false,
-            adminResponseMessage:
-              "Business is not approved, unavailable, or does not have enough quantity remaining.",
+            adminResponseMessage: "Service is not approved or is marked unavailable by the seller or admin.",
           },
         }
       );
       return res.status(409).json({
-        message: "Business is not approved, unavailable, or does not have enough quantity remaining.",
+        message: "Service is not approved or is marked unavailable by the seller or admin.",
       });
     }
 
@@ -238,11 +252,21 @@ const approveBooking = async (req, res) => {
     booking.preferredHotelId = booking.preferredHotelId || business._id;
     booking.supplierId = business.supplierId || null;
     booking.quantity = quantity;
+    const commissionPercentage = Math.max(0, Math.min(100, Number(req.body.commissionPercentage ?? business.commissionPercentage ?? 10)));
+    const depositPercentage = 30;
+    booking.totalPrice = Math.round(quotedTotal);
+    booking.depositPercentage = depositPercentage;
+    booking.depositAmount = Math.round((booking.totalPrice * depositPercentage) / 100);
+    booking.remainingBalance = Math.max(0, booking.totalPrice - booking.depositAmount);
+    booking.commissionPercentage = commissionPercentage;
+    booking.commissionAmount = Math.round((booking.totalPrice * commissionPercentage) / 100);
+    booking.paymentReason = paymentReason;
+    business.commissionPercentage = commissionPercentage;
     booking.status = "confirmed";
     booking.isConnected = true;
     booking.isAcknowledgedByAdmin = true;
     booking.acknowledgedAt = new Date();
-    booking.adminResponseMessage = `Booking approved and assigned to ${business.name}.`;
+    booking.adminResponseMessage = `Booking approved and assigned to ${business.name}. Payment purpose: ${paymentReason}`;
     if (!booking.bookingCode) booking.bookingCode = prefixedCode("SCN", 10);
     if (!booking.verificationCode) booking.verificationCode = prefixedCode("VERIFY", 10);
     if (!booking.verificationToken) {
@@ -250,14 +274,7 @@ const approveBooking = async (req, res) => {
     }
     await booking.save();
 
-    if (Number(business.quantityRemaining || 0) <= 0) {
-      business.status = "unavailable";
-      business.inventoryStatus = "fully-booked";
-      await business.save();
-    } else if (Number(business.quantityRemaining || 0) <= 3) {
-      business.inventoryStatus = "limited";
-      await business.save();
-    }
+    await business.save();
 
     emitUserRealtime(booking.touristId, REALTIME_EVENTS.BOOKING_CHANGED, {
       action: "confirmed",
@@ -277,31 +294,160 @@ const approveBooking = async (req, res) => {
   }
 };
 
+const rejectBooking = async (req, res) => {
+  try {
+    const reason = String(req.body.reason || "The booking request could not be approved.").trim();
+    const booking = await Booking.findOneAndUpdate(
+      { _id: req.params.bookingId, status: { $in: ["pending", "reviewing"] } },
+      {
+        $set: {
+          status: "rejected",
+          isAcknowledgedByAdmin: true,
+          acknowledgedAt: new Date(),
+          adminResponseMessage: reason,
+        },
+      },
+      { returnDocument: "after", runValidators: true }
+    );
+    if (!booking) return res.status(409).json({ message: "Only pending bookings can be rejected." });
+    emitUserRealtime(booking.touristId, REALTIME_EVENTS.BOOKING_CHANGED, {
+      action: "rejected",
+      bookingId: booking._id,
+      status: booking.status,
+    });
+    return res.json({ message: "Booking request rejected.", booking });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to reject booking.", error: error.message });
+  }
+};
+
+const updateMarketplaceSettings = async (req, res) => {
+  try {
+    const bookingRules = (Array.isArray(req.body.bookingRules) ? req.body.bookingRules : [])
+      .map((rule) => String(rule || "").trim())
+      .filter(Boolean)
+      .slice(0, 20);
+    const defaultCommissionPercentage = Math.max(0, Math.min(100, Number(req.body.defaultCommissionPercentage) || 10));
+    const bookingMode = ["manual", "automatic", "service-level"].includes(req.body.bookingMode)
+      ? req.body.bookingMode
+      : "manual";
+    const setting = await SiteSetting.findOneAndUpdate(
+      { key: "marketplace-settings" },
+      { $set: { value: { depositPercentage: 30, defaultCommissionPercentage, bookingMode, bookingRules } } },
+      { upsert: true, returnDocument: "after", runValidators: true }
+    );
+    clearCache("public:");
+    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "marketplace-settings-updated" });
+    if (AuditLog.db.readyState === 1) await AuditLog.create({ action: "admin-changed-global-booking-mode", actorId: req.user._id, actorRole: req.user.role, metadata: { bookingMode } });
+    return res.json({ message: "Marketplace booking settings updated.", settings: setting.value });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to update marketplace settings.", error: error.message });
+  }
+};
+
+const updateServiceBookingMode = async (req, res) => {
+  try {
+    const bookingMode = req.body.bookingMode === "automatic" ? "automatic" : "manual";
+    let automaticTable = null;
+    if (bookingMode === "automatic") {
+      const current = await Hotel.findById(req.params.businessId);
+      if (!current) return res.status(404).json({ message: "Service not found." });
+      const rows = current.availabilityTable?.rows || [];
+      const defaults = getAutomaticRuleDefaults(current.type);
+      const fallbackAvailability = Math.max(1, Number(current.quantityRemaining ?? current.availableQuantity ?? 1));
+      const completedRows = rows.map((row) => ({
+        id: row.id,
+        cells: {
+          ...(row.cells || {}),
+          priceType: row.cells?.priceType || defaults.priceType,
+          calculationField: row.cells?.calculationField || defaults.calculationField,
+          durationUnit: row.cells?.durationUnit || defaults.durationUnit,
+          maximumDuration: Number(row.cells?.maximumDuration || defaults.maximumDuration),
+          availability: Math.max(1, Number(row.cells?.availability || fallbackAvailability)),
+          details: String(row.cells?.details || current.description || "").trim().slice(0, 2000),
+        },
+      }));
+      const options = completedRows.map(normalizePriceOption);
+      if (!options.length || options.some((option) => !hasCompleteAutomaticRules(option))) {
+        return res.status(400).json({ message: "Automatic booking needs at least one option with an option name and an RWF price. Add those two values in the seller price options first." });
+      }
+      automaticTable = {
+        columns: [
+          { id: "service", label: "Option name" }, { id: "price", label: "Price (RWF)" },
+          { id: "priceType", label: "Price type" }, { id: "calculationField", label: "Calculation field" },
+          { id: "durationUnit", label: "Duration unit" }, { id: "maximumDuration", label: "Maximum duration" },
+          { id: "availability", label: "Availability / capacity" }, { id: "details", label: "Details / amenities" },
+        ],
+        rows: completedRows,
+        updatedAt: new Date(),
+      };
+    }
+    const business = await Hotel.findByIdAndUpdate(
+      req.params.businessId,
+      { $set: { bookingMode, ...(automaticTable ? { availabilityTable: automaticTable } : {}) } },
+      { returnDocument: "after", runValidators: true }
+    );
+    if (!business) return res.status(404).json({ message: "Service not found." });
+    await SiteSetting.findOneAndUpdate(
+      { key: "marketplace-settings" },
+      { $set: { "value.bookingMode": "service-level" }, $setOnInsert: { "value.depositPercentage": 30, "value.defaultCommissionPercentage": 10, "value.bookingRules": [] } },
+      { upsert: true, returnDocument: "after" }
+    );
+    if (AuditLog.db.readyState === 1) await AuditLog.create({ action: "admin-changed-service-booking-mode", actorId: req.user._id, actorRole: req.user.role, businessId: business._id, metadata: { bookingMode, legacyRulesCompleted: Boolean(automaticTable) } });
+    clearCache("public:");
+    return res.json({ message: `${business.name} now uses ${bookingMode} booking. Global mode changed to service-level control.`, service: business, globalBookingMode: "service-level" });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to update service booking mode.", error: error.message });
+  }
+};
+
 const listTransactions = async (_req, res) => {
   try {
     const transactions = await Transaction.find({})
       .populate("bookingId", "bookingCode status paymentStatus")
       .populate("userId", "name email")
       .populate("sellerId", "name email sellerId")
-      .populate("businessId", "name type")
+      .populate("businessId", "name type payoutDetails commissionPercentage")
       .sort({ createdAt: -1 });
 
     const summary = transactions.reduce(
       (acc, tx) => {
         if (tx.status === "paid") {
           acc.totalReceived += Number(tx.amount || 0);
-          acc.commissionEarned += Number(tx.commissionAmount || 0);
+          if (tx.commissionStatus === "collected") {
+            acc.commissionEarned += Number(tx.commissionAmount || 0);
+          } else if (tx.commissionStatus !== "waived") {
+            acc.commissionDue += Number(tx.commissionAmount || 0);
+          }
         } else {
           acc.pendingPayments += Number(tx.amount || 0);
         }
         return acc;
       },
-      { totalReceived: 0, commissionEarned: 0, pendingPayments: 0 }
+      { totalReceived: 0, commissionEarned: 0, commissionDue: 0, pendingPayments: 0 }
     );
 
     return res.json({ transactions, summary });
   } catch (error) {
     return res.status(500).json({ message: "Failed to fetch transactions.", error: error.message });
+  }
+};
+
+const updateCommissionStatus = async (req, res) => {
+  try {
+    const commissionStatus = String(req.body.commissionStatus || "").trim();
+    if (!["pending", "collected", "waived"].includes(commissionStatus)) {
+      return res.status(400).json({ message: "Commission status must be pending, collected, or waived." });
+    }
+    const transaction = await Transaction.findByIdAndUpdate(
+      req.params.transactionId,
+      { $set: { commissionStatus } },
+      { returnDocument: "after", runValidators: true }
+    );
+    if (!transaction) return res.status(404).json({ message: "Transaction not found." });
+    return res.json({ message: `Commission marked ${commissionStatus}.`, transaction });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to update commission status.", error: error.message });
   }
 };
 
@@ -1140,15 +1286,18 @@ const dashboardStats = async (_req, res) => {
 };
 
 module.exports = {
-  registerHotel,
   registerBusiness,
   createSeller,
   updateAnnouncement,
   listServices,
   updateBusinessVerification,
   approveBooking,
+  rejectBooking,
+  updateMarketplaceSettings,
+  updateServiceBookingMode,
   verifyBookingByLookup,
   listTransactions,
+  updateCommissionStatus,
   deleteUsers,
   deleteBusiness,
   getHotelStatus,

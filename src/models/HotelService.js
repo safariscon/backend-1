@@ -44,7 +44,7 @@ const hotelServiceSchema = new mongoose.Schema(
       },
       currency: {
         type: String,
-        default: "USD",
+        default: "RWF",
         trim: true,
       },
       unit: {
@@ -61,6 +61,10 @@ const hotelServiceSchema = new mongoose.Schema(
     images: {
       type: [String],
       default: [],
+      validate: {
+        validator: (images) => Array.isArray(images) && images.length <= 3,
+        message: "A service can have no more than 3 images.",
+      },
     },
     availabilityTable: {
       columns: {

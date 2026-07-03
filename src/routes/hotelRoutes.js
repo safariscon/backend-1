@@ -13,23 +13,23 @@ const {
   verifyMyBooking,
 } = require("../controllers/hotelController");
 const { uploadImages } = require("../controllers/uploadController");
-const { protect, hotelOnly } = require("../middleware/authMiddleware");
+const { protect, sellerOnly } = require("../middleware/authMiddleware");
 const { imageUpload } = require("../middleware/uploadMiddleware");
 
 const router = express.Router();
 
-router.get("/overview", protect, hotelOnly, getMyHotelOverview);
-router.get("/bookings", protect, hotelOnly, listMyBookings);
-router.get("/booking-verification/:lookup", protect, hotelOnly, verifyMyBooking);
-router.put("/bookings/:bookingId/status", protect, hotelOnly, updateBookingStatus);
-router.get("/rooms", protect, hotelOnly, listMyRooms);
-router.get("/services", protect, hotelOnly, listMyServices);
-router.post("/uploads/images", protect, hotelOnly, imageUpload.array("images", 3), uploadImages);
-router.post("/rooms", protect, hotelOnly, createRoom);
-router.put("/rooms/:roomId", protect, hotelOnly, updateRoom);
-router.post("/services", protect, hotelOnly, upsertMyService);
-router.put("/services/:serviceId", protect, hotelOnly, upsertMyService);
-router.delete("/services/:serviceId", protect, hotelOnly, deleteService);
-router.delete("/rooms/:roomId", protect, hotelOnly, deleteRoom);
+router.get("/overview", protect, sellerOnly, getMyHotelOverview);
+router.get("/bookings", protect, sellerOnly, listMyBookings);
+router.get("/booking-verification/:lookup", protect, sellerOnly, verifyMyBooking);
+router.put("/bookings/:bookingId/status", protect, sellerOnly, updateBookingStatus);
+router.get("/rooms", protect, sellerOnly, listMyRooms);
+router.get("/services", protect, sellerOnly, listMyServices);
+router.post("/uploads/images", protect, sellerOnly, imageUpload.array("images", 3), uploadImages);
+router.post("/rooms", protect, sellerOnly, createRoom);
+router.put("/rooms/:roomId", protect, sellerOnly, updateRoom);
+router.post("/services", protect, sellerOnly, upsertMyService);
+router.put("/services/:serviceId", protect, sellerOnly, upsertMyService);
+router.delete("/services/:serviceId", protect, sellerOnly, deleteService);
+router.delete("/rooms/:roomId", protect, sellerOnly, deleteRoom);
 
 module.exports = router;

@@ -34,37 +34,43 @@ const sellerBusinessFilter = (req) => ({
 });
 
 const normalizeAvailabilityTable = (table) => {
-  const rawColumns = Array.isArray(table?.columns) ? table.columns : [];
-  const columns = rawColumns
-    .map((column, index) => ({
-      id: String(column.id || `col_${index + 1}`).replace(/[^a-zA-Z0-9_-]/g, "_"),
-      label: String(column.label || column.name || `Column ${index + 1}`).trim(),
-    }))
-    .filter((column) => column.label)
-    .slice(0, 12);
-
-  const columnIds = new Set(columns.map((column) => column.id));
+  const columns = [
+    { id: "service", label: "Option name" },
+    { id: "price", label: "Price (RWF)" },
+    { id: "priceType", label: "Price type" },
+    { id: "calculationField", label: "Calculation field" },
+    { id: "durationUnit", label: "Duration unit" },
+    { id: "maximumDuration", label: "Maximum duration" },
+    { id: "availability", label: "Availability / capacity" },
+    { id: "details", label: "Details / amenities" },
+  ];
+  const allowedPriceTypes = new Set(["fixed", "per-person", "per-room", "per-night", "per-day", "per-hour", "per-item", "per-ticket", "per-package", "per-session"]);
+  const allowedCalculationFields = new Set(["people", "quantity", "duration", "package", "fixed"]);
+  const allowedDurationUnits = new Set(["minutes", "hours", "days", "nights", "same-day", "none"]);
   const rows = (Array.isArray(table?.rows) ? table.rows : [])
     .map((row, rowIndex) => {
       const rawCells = row?.cells && typeof row.cells === "object" ? row.cells : {};
       const cells = {};
-      for (const column of columns) {
-        cells[column.id] = String(rawCells[column.id] ?? "").trim();
-      }
-      for (const [key, value] of Object.entries(rawCells)) {
-        if (columnIds.has(key)) cells[key] = String(value ?? "").trim();
-      }
+      cells.service = String(rawCells.service ?? "").trim();
+      cells.price = String(rawCells.price ?? "").replace(/[^0-9]/g, "").trim();
+      cells.priceType = allowedPriceTypes.has(rawCells.priceType) ? rawCells.priceType : "";
+      cells.calculationField = allowedCalculationFields.has(rawCells.calculationField) ? rawCells.calculationField : "";
+      cells.durationUnit = allowedDurationUnits.has(rawCells.durationUnit) ? rawCells.durationUnit : "";
+      cells.maximumDuration = Math.max(0, Number(rawCells.maximumDuration || 0));
+      cells.availability = Math.max(0, Math.floor(Number(rawCells.availability || 0)));
+      cells.details = String(rawCells.details || "").replace(/<[^>]*>/g, "").trim().slice(0, 2000);
       return {
         id: String(row.id || `row_${rowIndex + 1}`).replace(/[^a-zA-Z0-9_-]/g, "_"),
         cells,
       };
     })
-    .slice(0, 100);
+    .filter((row) => row.cells.service && row.cells.price)
+    .slice(0, 50);
 
   return {
     columns,
     rows,
-    updatedAt: columns.length || rows.length ? new Date() : null,
+    updatedAt: new Date(),
   };
 };
 
@@ -174,7 +180,9 @@ const listMyBookings = async (req, res) => {
     const businesses = await Hotel.find(sellerBusinessFilter(req)).select("_id");
     const businessIds = businesses.map((business) => business._id);
 
-    const bookings = await Booking.find({ hotelId: { $in: businessIds } })
+    const bookings = await Booking.find({
+      $or: [{ hotelId: { $in: businessIds } }, { preferredHotelId: { $in: businessIds } }],
+    })
       .populate("touristId", "name email")
       .populate("hotelId", "name location type ownerEmail")
       .populate("roomId", "roomNumber type price status")
@@ -422,24 +430,6 @@ const updateBookingStatus = async (req, res) => {
       });
     }
 
-    if (status === "cancelled" && booking.hotelId) {
-      const quantity = Math.max(1, Number(booking.quantity || 1));
-      const business = await Hotel.findByIdAndUpdate(
-        booking.hotelId,
-        {
-          $inc: { quantityRemaining: quantity, availableQuantity: quantity },
-          $set: { status: "available", inventoryStatus: "available" },
-        },
-        { returnDocument: "after", runValidators: true }
-      );
-      if (business) {
-        emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, {
-          reason: "booking-cancelled-inventory-restored",
-          businessId: business._id,
-        });
-      }
-    }
-
     emitUserRealtime(booking.touristId, REALTIME_EVENTS.BOOKING_CHANGED, {
       action: "status-updated",
       bookingId: booking._id,
@@ -470,10 +460,52 @@ const upsertMyService = async (req, res) => {
       return res.status(400).json({ message: "category and business name are required." });
     }
     const quantity = Math.max(0, Number(req.body.availableQuantity || req.body.quantityRemaining || 1));
-    const amount = Number(req.body.pricing?.amount || req.body.price || 0);
+    const locationDetails = {
+      district: String(req.body.locationDetails?.district || "").trim(),
+      sector: String(req.body.locationDetails?.sector || "").trim(),
+      cell: String(req.body.locationDetails?.cell || "").trim(),
+      village: String(req.body.locationDetails?.village || "").trim(),
+    };
+    if (Object.values(locationDetails).some((value) => !value)) {
+      return res.status(400).json({ message: "District, sector, cell, and village are all required." });
+    }
+    const fullLocation = `${locationDetails.village}, ${locationDetails.cell}, ${locationDetails.sector}, ${locationDetails.district}`;
+    const payoutDetails = {
+      method: String(req.body.payoutDetails?.method || "mobile-money").trim(),
+      accountName: String(req.body.payoutDetails?.accountName || "").trim(),
+      accountNumber: String(req.body.payoutDetails?.accountNumber || "").trim(),
+      instructions: String(req.body.payoutDetails?.instructions || "").trim(),
+    };
+    if (!payoutDetails.accountName || !payoutDetails.accountNumber) {
+      return res.status(400).json({ message: "Payout account name and phone/account number are required." });
+    }
     const normalizedStatus = req.body.status === "unavailable" ? "unavailable" : "available";
     const availabilityTable = normalizeAvailabilityTable(req.body.availabilityTable);
+    if (!availabilityTable.rows.length) {
+      return res.status(400).json({ message: "Add at least one service and its RWF price." });
+    }
     const bookingForm = normalizeBookingForm(req.body.bookingForm);
+    const promotionInput = req.body.promotion && typeof req.body.promotion === "object"
+      ? req.body.promotion
+      : {};
+    const promotion = {
+      enabled: promotionInput.enabled === true,
+      title: String(promotionInput.title || "").trim(),
+      description: String(promotionInput.description || "").trim(),
+      startAt: promotionInput.startAt ? new Date(promotionInput.startAt) : null,
+      endAt: promotionInput.endAt ? new Date(promotionInput.endAt) : null,
+    };
+    if (promotion.enabled) {
+      if (!promotion.title || !promotion.description || !promotion.startAt || !promotion.endAt) {
+        return res.status(400).json({ message: "Promotion title, description, start time, and end time are required." });
+      }
+      if (Number.isNaN(promotion.startAt.getTime()) || Number.isNaN(promotion.endAt.getTime())) {
+        return res.status(400).json({ message: "Promotion start and end times must be valid." });
+      }
+      if (promotion.endAt <= promotion.startAt) {
+        return res.status(400).json({ message: "Promotion end time must be after its start time." });
+      }
+    }
     const inventoryStatus = resolveInventoryStatus({
       status: normalizedStatus,
       quantity,
@@ -487,23 +519,40 @@ const upsertMyService = async (req, res) => {
 
     if (serviceId) {
       const existingBusiness = await Hotel.findOne({ _id: serviceId, ...sellerBusinessFilter(req) }).select(
-        "approvalStatus"
+        "approvalStatus promotion"
       );
       if (!existingBusiness) {
         return res.status(404).json({ message: "Business not found." });
       }
 
+      const existingPromotion = existingBusiness.promotion || {};
+      const promotionChanged = promotion.enabled && (
+        existingPromotion.enabled !== true ||
+        existingPromotion.title !== promotion.title ||
+        existingPromotion.description !== promotion.description ||
+        new Date(existingPromotion.startAt || 0).getTime() !== promotion.startAt.getTime() ||
+        new Date(existingPromotion.endAt || 0).getTime() !== promotion.endAt.getTime()
+      );
       const business = await Hotel.findOneAndUpdate(
         { _id: serviceId, ...sellerBusinessFilter(req) },
         {
           $set: {
             name: title,
             type: String(category).trim(),
-            location: String(req.body.location || "Rwanda").trim(),
+            location: fullLocation,
+            locationDetails,
             description: String(description || "").trim(),
-            basePrice: Number.isFinite(amount) ? amount : 0,
-            priceText: String(req.body.priceText || "").trim(),
+            basePrice: 0,
+            priceText: "",
             images,
+            promotion,
+            ...(req.body.contactDetails && typeof req.body.contactDetails === "object"
+              ? {
+                  "contactDetails.phone": String(req.body.contactDetails.phone || "").trim(),
+                  "contactDetails.whatsapp": String(req.body.contactDetails.whatsapp || "").trim(),
+                }
+              : {}),
+            payoutDetails,
             services: [String(category).trim()],
             status: normalizedStatus,
             availableQuantity: quantity,
@@ -513,6 +562,14 @@ const upsertMyService = async (req, res) => {
             inventoryStatus,
             approvalStatus: existingBusiness.approvalStatus === "approved" ? "approved" : "pending",
           },
+          ...(promotionChanged ? {
+            $push: {
+              promotionHistory: {
+                $each: [{ ...promotion, recordedAt: new Date() }],
+                $slice: -20,
+              },
+            },
+          } : {}),
         },
         { returnDocument: "after", runValidators: true }
       );
@@ -532,13 +589,22 @@ const upsertMyService = async (req, res) => {
     const business = await Hotel.create({
       name: title,
       type: String(category).trim(),
-      location: String(req.body.location || "Rwanda").trim(),
+      location: fullLocation,
+      locationDetails,
       description: String(description || "").trim(),
-      basePrice: Number.isFinite(amount) ? amount : 0,
-      priceText: String(req.body.priceText || "").trim(),
+      basePrice: 0,
+      priceText: "",
       amenities: [],
       contactInfo: req.user.email,
+      contactDetails: {
+        ...(req.body.contactDetails && typeof req.body.contactDetails === "object" ? req.body.contactDetails : {}),
+        email: req.body.contactDetails?.email || req.user.email,
+        phone: req.body.contactDetails?.phone || req.user.phone || "",
+      },
+      payoutDetails,
       images,
+      promotion,
+      promotionHistory: promotion.enabled ? [{ ...promotion, recordedAt: new Date() }] : [],
       services: [String(category).trim()],
       ownerEmail: `${req.user.sellerId || req.user._id}-${Date.now()}@seller.local`.toLowerCase(),
       sellerContactEmail: req.user.email,
@@ -550,6 +616,7 @@ const upsertMyService = async (req, res) => {
       quantityRemaining: quantity,
       availabilityTable,
       bookingForm,
+      bookingMode: "manual",
       inventoryStatus,
     });
 

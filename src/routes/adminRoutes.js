@@ -1,6 +1,5 @@
 const express = require("express");
 const {
-  registerHotel,
   registerBusiness,
   connectTour,
   acknowledgeRequest,
@@ -19,8 +18,12 @@ const {
   listServices,
   updateBusinessVerification,
   approveBooking,
+  rejectBooking,
+  updateMarketplaceSettings,
+  updateServiceBookingMode,
   verifyBookingByLookup,
   listTransactions,
+  updateCommissionStatus,
   deleteUsers,
   deleteBusiness,
 } = require("../controllers/adminController");
@@ -37,18 +40,25 @@ const {
 } = require("../controllers/marketplaceAdminController");
 const { protect, adminOnly } = require("../middleware/authMiddleware");
 const { imageUpload } = require("../middleware/uploadMiddleware");
+const { getMongoStorage, getCloudinaryStorage, getStorageOverview } = require("../controllers/storageController");
+const { getAnalyticsOverview, getAnalyticsServices, getAnalyticsPayments } = require("../controllers/analyticsController");
 
 const router = express.Router();
 
 router.use(protect, adminOnly);
 
-router.post("/register-hotel", registerHotel);
 router.post("/register-business", registerBusiness);
 router.post("/sellers", createSeller);
 router.post("/uploads/image", imageUpload.single("image"), uploadImage);
 router.post("/connect-tour", connectTour);
 router.post("/acknowledge-request", acknowledgeRequest);
 router.get("/dashboard-stats", dashboardStats);
+router.get("/storage/mongodb", getMongoStorage);
+router.get("/storage/cloudinary", getCloudinaryStorage);
+router.get("/storage/overview", getStorageOverview);
+router.get("/analytics/overview", getAnalyticsOverview);
+router.get("/analytics/services", getAnalyticsServices);
+router.get("/analytics/payments", getAnalyticsPayments);
 router.put("/announcement", updateAnnouncement);
 router.get("/users", listUsers);
 router.get("/hotels", listHotels);
@@ -59,11 +69,15 @@ router.get("/hotels/:hotelId/status", getHotelStatus);
 router.get("/bookings", listBookings);
 router.get("/booking-verification/:lookup", verifyBookingByLookup);
 router.put("/bookings/:bookingId/approve", approveBooking);
+router.put("/bookings/:bookingId/reject", rejectBooking);
+router.put("/marketplace-settings", updateMarketplaceSettings);
+router.put("/businesses/:businessId/booking-mode", updateServiceBookingMode);
 router.get("/services", listServices);
 router.put("/businesses/:businessId/verification", updateBusinessVerification);
 router.put("/businesses/:businessId/approval", updateBusinessVerification);
 router.delete("/businesses/:businessId", deleteBusiness);
 router.get("/transactions", listTransactions);
+router.put("/transactions/:transactionId/commission", updateCommissionStatus);
 router.get("/marketplace/overview", getMarketplaceOverview);
 router.get("/marketplace/suppliers", listSuppliers);
 router.post("/marketplace/suppliers", createSupplier);
