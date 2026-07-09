@@ -256,8 +256,10 @@ const approveBooking = async (req, res) => {
     const depositPercentage = 30;
     booking.totalPrice = Math.round(quotedTotal);
     booking.depositPercentage = depositPercentage;
+    booking.depositPercent = depositPercentage;
     booking.depositAmount = Math.round((booking.totalPrice * depositPercentage) / 100);
     booking.remainingBalance = Math.max(0, booking.totalPrice - booking.depositAmount);
+    booking.detailsUnlocked = false;
     booking.commissionPercentage = commissionPercentage;
     booking.commissionAmount = Math.round((booking.totalPrice * commissionPercentage) / 100);
     booking.paymentReason = paymentReason;
@@ -876,6 +878,7 @@ const listBookings = async (_req, res) => {
       .populate("hotelId", "name location ownerEmail")
       .populate("roomId", "roomNumber type price status")
       .populate("tourHelpers", "name phone email")
+      .populate("completedBySeller", "name email sellerId")
       .sort({ createdAt: -1 });
 
     return res.json({ bookings });

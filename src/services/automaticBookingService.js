@@ -117,6 +117,63 @@ const calculateQuote = ({ option, people, quantity, duration }) => {
   return { total, deposit, remaining, reason };
 };
 
+const getActivePromotion = (promotion, now = new Date()) => {
+  if (!promotion?.enabled) return null;
+  const percent = Number(promotion.percent ?? promotion.promotionPercent ?? 0);
+  const startAt = promotion.startAt ? new Date(promotion.startAt) : null;
+  const endAt = promotion.endAt ? new Date(promotion.endAt) : null;
+  if (!Number.isFinite(percent) || percent <= 0 || percent > 100) return null;
+  if (!startAt || !endAt || Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime())) return null;
+  if (startAt >= endAt || startAt > now || endAt < now) return null;
+  return {
+    title: cleanText(promotion.title, 100),
+    percent,
+    note: cleanText(promotion.note || promotion.description, 500),
+    startAt,
+    endAt,
+  };
+};
+
+const applyPromotionToQuote = ({ quote, promotion, now = new Date() }) => {
+  const activePromotion = getActivePromotion(promotion, now);
+  const originalPrice = Math.max(0, Number(quote.total || 0));
+  if (!activePromotion) {
+    return {
+      ...quote,
+      originalPrice,
+      promotionApplied: false,
+      promotionTitle: "",
+      promotionPercent: 0,
+      discountAmount: 0,
+      finalPrice: originalPrice,
+      depositPercent: 30,
+      depositAmount: Math.round(originalPrice * 0.3),
+      remaining: originalPrice - Math.round(originalPrice * 0.3),
+    };
+  }
+  const discountAmount = Math.round((originalPrice * activePromotion.percent) / 100);
+  const finalPrice = Math.max(0, originalPrice - discountAmount);
+  const depositAmount = Math.round(finalPrice * 0.3);
+  return {
+    ...quote,
+    total: finalPrice,
+    deposit: depositAmount,
+    remaining: finalPrice - depositAmount,
+    originalPrice,
+    promotionApplied: true,
+    promotionTitle: activePromotion.title,
+    promotionPercent: activePromotion.percent,
+    promotionNote: activePromotion.note,
+    promotionStartAt: activePromotion.startAt,
+    promotionEndAt: activePromotion.endAt,
+    discountAmount,
+    finalPrice,
+    depositPercent: 30,
+    depositAmount,
+    reason: `${activePromotion.title}: Save ${activePromotion.percent}% on this service. Valid from ${activePromotion.startAt.toLocaleDateString("en-US")} to ${activePromotion.endAt.toLocaleDateString("en-US")}. The discounted price is RWF ${finalPrice.toLocaleString("en-US")}, and the required 30% deposit is RWF ${depositAmount.toLocaleString("en-US")}.`,
+  };
+};
+
 module.exports = {
   cleanText,
   normalizePriceOption,
@@ -126,4 +183,6 @@ module.exports = {
   getAutomaticRuleDefaults,
   calculateDuration,
   calculateQuote,
+  getActivePromotion,
+  applyPromotionToQuote,
 };

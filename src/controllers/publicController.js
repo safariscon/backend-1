@@ -19,6 +19,7 @@ const buildQrImageUrl = (token) =>
   `https://api.qrserver.com/v1/create-qr-code/?size=260x260&margin=12&data=${encodeURIComponent(
     buildVerifyUrl(token)
   )}`;
+const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
 
 const listPublicHotels = async (req, res) => {
   try {
@@ -151,10 +152,11 @@ const verifyBooking = async (req, res) => {
       return res.status(404).json({ verified: false, result: "INVALID", message: "Invalid booking verification token." });
     }
 
-    const verified = ["deposit-paid", "paid"].includes(booking.paymentStatus) && ["confirmed", "deposit-paid", "provider-details-unlocked", "completed"].includes(booking.status);
+    const depositPaid = DEPOSIT_PAID_STATUSES.includes(booking.paymentStatus);
+    const verified = depositPaid && ["confirmed", "deposit-paid", "provider-details-unlocked", "completed"].includes(booking.status);
     return res.json({
       verified,
-      result: verified ? "VERIFIED" : ["deposit-paid", "paid"].includes(booking.paymentStatus) ? "INVALID" : "PENDING",
+      result: verified ? "VERIFIED" : depositPaid ? "INVALID" : "PENDING",
       booking: {
         id: booking._id,
         bookingCode: booking.bookingCode,
@@ -180,7 +182,7 @@ const publicReceipt = async (req, res) => {
       .populate("touristId", "name email")
       .populate("hotelId", "name ownerEmail sellerContactEmail contactInfo contactDetails location type images description");
     if (!booking) return res.status(404).send("Receipt not found.");
-    if (!["deposit-paid", "paid"].includes(booking.paymentStatus)) return res.status(400).send("Receipt is not ready.");
+    if (!DEPOSIT_PAID_STATUSES.includes(booking.paymentStatus)) return res.status(400).send("Receipt is not ready.");
     if (!booking.receipt?.receiptNumber) {
       booking.receipt = {
         receiptNumber: `RCT-${String(booking._id).slice(-8).toUpperCase()}`,
@@ -226,7 +228,7 @@ const publicQr = async (req, res) => {
     const booking = await Booking.findOne({ verificationToken: req.params.token })
       .select("paymentStatus verificationToken")
       .lean();
-    if (!booking || !["deposit-paid", "paid"].includes(booking.paymentStatus)) return res.status(404).send("QR code not found.");
+    if (!booking || !DEPOSIT_PAID_STATUSES.includes(booking.paymentStatus)) return res.status(404).send("QR code not found.");
     const image = await QRCode.toBuffer(buildVerifyUrl(booking.verificationToken), {
       type: "png",
       width: 320,

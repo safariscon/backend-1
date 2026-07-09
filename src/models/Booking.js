@@ -19,6 +19,15 @@ const bookingSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
+    bookingCodeUsed: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    bookingCodeUsedAt: {
+      type: Date,
+      default: null,
+    },
     anonymousBusinessName: {
       type: String,
       default: "",
@@ -154,6 +163,12 @@ const bookingSchema = new mongoose.Schema(
       min: 0,
       max: 100,
     },
+    depositPercent: {
+      type: Number,
+      default: 30,
+      min: 0,
+      max: 100,
+    },
     depositAmount: {
       type: Number,
       default: 0,
@@ -177,8 +192,13 @@ const bookingSchema = new mongoose.Schema(
     },
     paymentStatus: {
       type: String,
-      enum: ["unpaid", "pending", "deposit-paid", "paid", "failed", "refunded"],
+      enum: ["unpaid", "pending", "deposit-paid", "deposit_paid", "paid", "failed", "refunded", "completed"],
       default: "unpaid",
+      index: true,
+    },
+    detailsUnlocked: {
+      type: Boolean,
+      default: false,
       index: true,
     },
     paymentMethod: {
@@ -317,6 +337,79 @@ const bookingSchema = new mongoose.Schema(
         min: 0,
       },
     },
+    refundStatus: {
+      type: String,
+      enum: ["none", "pending", "approved", "refunded", "not_applicable"],
+      default: "none",
+      index: true,
+    },
+    refundAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    refundReason: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 500,
+    },
+    refundPercentOfDeposit: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 100,
+    },
+    cancelledAt: {
+      type: Date,
+      default: null,
+    },
+    cancellationReason: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 500,
+    },
+    completionStatus: {
+      type: String,
+      enum: ["pending", "completed"],
+      default: "pending",
+      index: true,
+    },
+    remainingPaymentStatus: {
+      type: String,
+      enum: ["unpaid", "paid_to_seller"],
+      default: "unpaid",
+      index: true,
+    },
+    remainingAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    completedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    completedBySeller: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
+    },
+    completionAuditLogs: {
+      type: [
+        {
+          event: { type: String, required: true, trim: true },
+          message: { type: String, default: "", trim: true },
+          actorId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+          actorRole: { type: String, default: "system", trim: true },
+          at: { type: Date, default: Date.now },
+        },
+      ],
+      default: [],
+    },
     availabilityLocks: [
       {
         type: mongoose.Schema.Types.ObjectId,
@@ -368,6 +461,10 @@ bookingSchema.index({ hotelId: 1, status: 1, createdAt: -1 });
 bookingSchema.index({ touristId: 1, createdAt: -1 });
 bookingSchema.index({ "items.serviceId": 1, status: 1 });
 bookingSchema.index({ bookingCode: 1, verificationToken: 1 });
+bookingSchema.index(
+  { bookingCode: 1 },
+  { unique: true, partialFilterExpression: { bookingCode: { $type: "string", $ne: "" } } }
+);
 bookingSchema.index({ originalBookingId: 1, rebookRequestId: 1 });
 
 module.exports = mongoose.model("Booking", bookingSchema);

@@ -17,6 +17,8 @@ const {
   resolveBookingMode,
   calculateDuration,
   calculateQuote,
+  applyPromotionToQuote,
+  getActivePromotion,
 } = require("../services/automaticBookingService");
 
 const publicFrontendUrl = () =>
@@ -29,6 +31,75 @@ const buildQrImageUrl = (token) =>
     buildVerifyUrl(token)
   )}`;
 
+const DEPOSIT_PERCENT = 30;
+const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
+const REFUND_PERCENT = Object.freeze({ cancel: 20, noAction: 15 });
+
+const hasDepositPaid = (booking) => Boolean(booking?.detailsUnlocked) || DEPOSIT_PAID_STATUSES.includes(booking?.paymentStatus);
+
+const calculateDepositAmount = (totalPrice, depositPercent = DEPOSIT_PERCENT) =>
+  Math.round((Math.max(0, Number(totalPrice || 0)) * Math.max(0, Number(depositPercent || 0))) / 100);
+
+const getPaidDepositAmount = (booking) => {
+  const configuredDeposit = Number(booking?.depositAmount || 0);
+  const calculatedDeposit = calculateDepositAmount(booking?.totalPrice, booking?.depositPercent || booking?.depositPercentage || DEPOSIT_PERCENT);
+  const paidAmount = Number(booking?.amountPaid || 0);
+  const deposit = configuredDeposit || calculatedDeposit;
+  return Math.max(0, paidAmount > 0 ? Math.min(paidAmount, deposit) : deposit);
+};
+
+const calculateRefundAmount = (booking, refundPercentOfDeposit) =>
+  Math.round((getPaidDepositAmount(booking) * Math.max(0, Number(refundPercentOfDeposit || 0))) / 100);
+
+const resolveBookingActionDeadline = (booking) => {
+  const details = booking?.bookingDetails || {};
+  const value = details.bookingDate || details.startDate || details.pickupDate || booking?.checkIn;
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const buildLockedBusiness = (sourceBusiness, booking) => {
+  if (!sourceBusiness) return null;
+  const locationDetails = {
+    district: sourceBusiness.locationDetails?.district || sourceBusiness.district || "",
+    sector: sourceBusiness.locationDetails?.sector || sourceBusiness.sector || "",
+  };
+  return {
+    _id: sourceBusiness._id,
+    name: booking.anonymousBusinessName || createGuestName(sourceBusiness.type, 1),
+    type: sourceBusiness.type,
+    description: sourceBusiness.description || "",
+    services: sourceBusiness.services || [],
+    images: sourceBusiness.images || [],
+    location: locationDetails.district || sourceBusiness.location || "District available after seller updates location",
+    locationDetails,
+    district: locationDetails.district,
+    sector: locationDetails.sector,
+    basePrice: Number(sourceBusiness.basePrice || booking.totalPrice || 0),
+    priceText: sourceBusiness.priceText || "",
+    isAnonymous: true,
+  };
+};
+
+const applyBookingRefund = async ({ booking, refundPercentOfDeposit, refundReason, cancellationReason = "", status = "cancelled", now = new Date() }) => {
+  const refundAmount = calculateRefundAmount(booking, refundPercentOfDeposit);
+  booking.status = status;
+  booking.paymentStatus = "refunded";
+  booking.refundStatus = "approved";
+  booking.refundAmount = refundAmount;
+  booking.refundReason = refundReason;
+  booking.refundPercentOfDeposit = refundPercentOfDeposit;
+  booking.cancelledAt = now;
+  booking.cancellationReason = cancellationReason || refundReason;
+  booking.cancellation = {
+    ...(booking.cancellation || {}),
+    cancelledAt: now,
+    refundAmount,
+  };
+  return booking.save();
+};
+
 const createBookingRequest = async (req, res) => {
   let reservedBusiness = null;
   let reservedOptionId = "";
@@ -36,6 +107,7 @@ const createBookingRequest = async (req, res) => {
   let rebookClaim = null;
   let rebookFinalized = false;
   let createdBooking = null;
+  let rebookOriginalBooking = null;
   try {
     const {
       hotelId,
@@ -98,24 +170,16 @@ const createBookingRequest = async (req, res) => {
       }
       preferredHotelId = hotel._id;
       selectedBusiness = hotel;
-      const promotion = hotel.promotion;
       const now = new Date();
-      const promotionStart = promotion?.startAt ? new Date(promotion.startAt) : null;
-      const promotionEnd = promotion?.endAt ? new Date(promotion.endAt) : null;
-      if (
-        promotion?.enabled === true &&
-        promotion.title &&
-        promotion.description &&
-        promotionStart &&
-        promotionEnd &&
-        promotionStart <= now &&
-        promotionEnd >= now
-      ) {
+      const promotion = getActivePromotion(hotel.promotion, now);
+      if (promotion) {
         promotionSnapshot = {
           title: promotion.title,
-          description: promotion.description,
-          startAt: promotionStart,
-          endAt: promotionEnd,
+          description: promotion.note,
+          note: promotion.note,
+          percent: promotion.percent,
+          startAt: promotion.startAt,
+          endAt: promotion.endAt,
           appliedAt: now,
         };
       }
@@ -184,7 +248,15 @@ const createBookingRequest = async (req, res) => {
       reservedBusiness = selectedBusiness._id;
       reservedOptionId = selectedOption.id;
       reservedQuantity = capacityNeeded;
-      automaticQuote = { ...calculateQuote({ option: selectedOption, people, quantity: units, duration }), people, quantity: units, duration };
+      automaticQuote = {
+        ...applyPromotionToQuote({
+          quote: calculateQuote({ option: selectedOption, people, quantity: units, duration }),
+          promotion: selectedBusiness.promotion,
+        }),
+        people,
+        quantity: units,
+        duration,
+      };
       bookingStatus = "waiting-for-payment";
       paymentStatus = "pending";
     }
@@ -198,6 +270,10 @@ const createBookingRequest = async (req, res) => {
         rebookId,
         customerId: req.user._id,
         serviceId: preferredHotelId,
+      });
+      rebookOriginalBooking = await Booking.findOne({
+        _id: rebookClaim.originalBookingId,
+        touristId: req.user._id,
       });
     }
     const bookingCode = prefixedCode("SCN", 10);
@@ -215,15 +291,22 @@ const createBookingRequest = async (req, res) => {
       guests: Number(guests) || bookingQuantity,
       quantity: bookingQuantity,
       totalPrice: automaticQuote?.total || 0,
-      depositPercentage: 30,
-      depositAmount: automaticQuote?.deposit || 0,
-      remainingBalance: automaticQuote?.remaining || 0,
+      depositPercentage: DEPOSIT_PERCENT,
+      depositPercent: DEPOSIT_PERCENT,
+      depositAmount: rebookOriginalBooking ? getPaidDepositAmount(rebookOriginalBooking) : automaticQuote?.deposit || 0,
+      remainingBalance: rebookOriginalBooking ? Math.max(0, Number(automaticQuote?.total || 0) - getPaidDepositAmount(rebookOriginalBooking)) : automaticQuote?.remaining || 0,
       bookingCode,
       anonymousBusinessName,
       verificationCode,
       verificationToken,
-      paymentStatus,
-      status: bookingStatus,
+      amountPaid: rebookOriginalBooking ? getPaidDepositAmount(rebookOriginalBooking) : 0,
+      paymentStatus: rebookOriginalBooking ? "deposit_paid" : paymentStatus,
+      detailsUnlocked: Boolean(rebookOriginalBooking),
+      refundStatus: rebookOriginalBooking ? "not_applicable" : "none",
+      refundAmount: 0,
+      refundReason: rebookOriginalBooking ? "Deposit transferred to successful re-booking." : "",
+      refundPercentOfDeposit: 0,
+      status: rebookOriginalBooking ? "provider-details-unlocked" : bookingStatus,
       bookingDetails: details,
       bookingMode: effectiveMode,
       serviceOptionId: selectedOption?.id || "",
@@ -234,6 +317,13 @@ const createBookingRequest = async (req, res) => {
         numberOfPeople: automaticQuote.people,
         quantity: automaticQuote.quantity,
         totalPrice: automaticQuote.total,
+        originalPrice: automaticQuote.originalPrice,
+        promotionApplied: automaticQuote.promotionApplied,
+        promotionTitle: automaticQuote.promotionTitle,
+        promotionPercent: automaticQuote.promotionPercent,
+        discountAmount: automaticQuote.discountAmount,
+        finalPrice: automaticQuote.finalPrice,
+        depositPercent: automaticQuote.depositPercent,
         depositAmount: automaticQuote.deposit,
         remainingBalance: automaticQuote.remaining,
         paymentReason: automaticQuote.reason,
@@ -262,6 +352,17 @@ const createBookingRequest = async (req, res) => {
           actor: req.user,
         });
         rebookFinalized = true;
+        await Booking.updateOne(
+          { _id: rebookClaim.originalBookingId, touristId: req.user._id },
+          {
+            $set: {
+              refundStatus: "not_applicable",
+              refundAmount: 0,
+              refundReason: "Deposit transferred to successful re-booking.",
+              refundPercentOfDeposit: 0,
+            },
+          }
+        );
       } catch (claimError) {
         await Booking.deleteOne({ _id: booking._id }).catch(() => {});
         createdBooking = null;
@@ -369,7 +470,7 @@ const payBooking = async (req, res) => {
       await booking.save();
       return res.status(409).json({ message: "This automatic quote expired and its availability was released. Please make a new booking." });
     }
-    if (["deposit-paid", "paid"].includes(booking.paymentStatus)) {
+    if (hasDepositPaid(booking)) {
       const transaction = await Transaction.findOne({ bookingId: booking._id, status: "paid" }).sort({ createdAt: -1 });
       return res.json({
         message: "Payment was already recorded.",
@@ -391,8 +492,8 @@ const payBooking = async (req, res) => {
     if (exactTotal <= 0) {
       return res.status(400).json({ message: "Admin must set the exact RWF quote before the deposit can be paid." });
     }
-    const depositPercentage = Number(booking.depositPercentage || 30);
-    const amount = Number(booking.depositAmount || Math.round((exactTotal * depositPercentage) / 100));
+    const depositPercentage = Number(booking.depositPercent || booking.depositPercentage || DEPOSIT_PERCENT);
+    const amount = Number(booking.depositAmount || calculateDepositAmount(exactTotal, depositPercentage));
     const commissionAmount = Number(booking.commissionAmount || Math.round((exactTotal * Number(booking.commissionPercentage || 0)) / 100));
     const paymentReference = prefixedCode("PAY", 14);
     if (!booking.bookingCode) booking.bookingCode = prefixedCode("SCN", 10);
@@ -404,7 +505,7 @@ const payBooking = async (req, res) => {
     const qrPayload = buildQrPayload(
       {
         ...booking.toObject(),
-        paymentStatus: "deposit-paid",
+        paymentStatus: "deposit_paid",
         paymentMethod: method,
         paymentReference,
         amountPaid: amount,
@@ -417,16 +518,19 @@ const payBooking = async (req, res) => {
       {
         _id: booking._id,
         touristId: req.user._id,
-        paymentStatus: { $nin: ["deposit-paid", "paid"] },
+        paymentStatus: { $nin: DEPOSIT_PAID_STATUSES },
       },
       {
         $set: {
-          paymentStatus: "deposit-paid",
+          paymentStatus: "deposit_paid",
           paymentMethod: method,
           paymentReference,
           amountPaid: amount,
+          depositPercent: depositPercentage,
+          depositPercentage,
           depositAmount: amount,
           remainingBalance: Math.max(0, exactTotal - amount),
+          detailsUnlocked: true,
           status: booking.bookingMode === "automatic" ? "provider-details-unlocked" : booking.status,
           "availabilityReservation.status": booking.bookingMode === "automatic" ? "paid" : booking.availabilityReservation?.status,
           qrPayload,
@@ -548,7 +652,7 @@ const downloadReceipt = async (req, res) => {
       .populate("touristId", "name email")
       .populate("hotelId", "name ownerEmail sellerContactEmail contactInfo contactDetails location type images description");
     if (!booking) return res.status(404).json({ message: "Booking not found." });
-    if (!["deposit-paid", "paid"].includes(booking.paymentStatus)) {
+    if (!hasDepositPaid(booking)) {
       return res.status(400).json({ message: "Receipt is available after the 30% deposit is confirmed." });
     }
     if (!booking.receipt?.receiptNumber) {
@@ -597,7 +701,7 @@ const listMyBookings = async (req, res) => {
   try {
     const missingSecureFields = await Booking.find({
       touristId: req.user._id,
-      paymentStatus: { $in: ["deposit-paid", "paid"] },
+      paymentStatus: { $in: DEPOSIT_PAID_STATUSES },
       $or: [
         { bookingCode: "" },
         { verificationCode: "" },
@@ -625,21 +729,13 @@ const listMyBookings = async (req, res) => {
 
     const customerBookings = bookings.map((bookingDocument) => {
       const booking = bookingDocument.toObject();
-      if (["deposit-paid", "paid"].includes(booking.paymentStatus)) {
-        return { ...booking, providerDetailsUnlocked: true };
+      if (hasDepositPaid(booking)) {
+        return { ...booking, detailsUnlocked: true, providerDetailsUnlocked: true };
       }
 
       const sourceBusiness = booking.hotelId || booking.preferredHotelId;
       const anonymousName = booking.anonymousBusinessName || createGuestName(sourceBusiness?.type, 1);
-      const hiddenBusiness = sourceBusiness
-        ? {
-            _id: sourceBusiness._id,
-            name: anonymousName,
-            type: sourceBusiness.type,
-            location: sourceBusiness.locationDetails?.district || "District available after seller updates location",
-            isAnonymous: true,
-          }
-        : null;
+      const hiddenBusiness = sourceBusiness ? buildLockedBusiness(sourceBusiness, { ...booking, anonymousBusinessName: anonymousName }) : null;
 
       return {
         ...booking,
@@ -647,7 +743,18 @@ const listMyBookings = async (req, res) => {
         preferredHotelId: hiddenBusiness,
         hotelId: hiddenBusiness,
         tourHelpers: [],
+        detailsUnlocked: false,
         providerDetailsUnlocked: false,
+        lockedDetails: {
+          visible: {
+            publicServiceDetails: hiddenBusiness?.description || booking.destinationPlace,
+            district: hiddenBusiness?.district || "",
+            sector: hiddenBusiness?.sector || "",
+            price: Number(booking.totalPrice || hiddenBusiness?.basePrice || 0),
+            depositAmountRequired: Number(booking.depositAmount || calculateDepositAmount(booking.totalPrice, booking.depositPercent || booking.depositPercentage || DEPOSIT_PERCENT)),
+          },
+          hiddenUntilDeposit: ["seller phone", "exact address", "map coordinates", "direction button", "private check-in instructions"],
+        },
         adminResponseMessage: booking.adminResponseMessage || (booking.status === "confirmed"
           ? "Your booking is approved. Complete payment to unlock the provider details."
           : booking.isAcknowledgedByAdmin
@@ -665,9 +772,94 @@ const listMyBookings = async (req, res) => {
   }
 };
 
+const cancelBooking = async (req, res) => {
+  try {
+    const reason = String(req.body.cancellationReason || req.body.reason || "Customer cancelled booking.").trim().slice(0, 500);
+    const booking = await Booking.findOne({
+      _id: req.params.bookingId,
+      touristId: req.user._id,
+      status: { $nin: ["cancelled", "completed", "rejected"] },
+    });
+    if (!booking) return res.status(404).json({ message: "Booking not found or cannot be cancelled." });
+    if (!hasDepositPaid(booking)) return res.status(409).json({ message: "No paid 30% deposit is available for refund." });
+    if (booking.refundStatus && booking.refundStatus !== "none") {
+      return res.status(409).json({ message: "This booking already has a refund decision." });
+    }
+
+    const refundedBooking = await applyBookingRefund({
+      booking,
+      refundPercentOfDeposit: REFUND_PERCENT.cancel,
+      refundReason: "Customer cancelled booking.",
+      cancellationReason: reason,
+    });
+
+    if (AuditLog.db.readyState === 1) {
+      await AuditLog.create({
+        action: "booking-cancel-refund-approved",
+        actorId: req.user._id,
+        actorRole: req.user.role,
+        bookingId: refundedBooking._id,
+        businessId: refundedBooking.hotelId || refundedBooking.preferredHotelId || null,
+        metadata: { refundAmount: refundedBooking.refundAmount, refundPercentOfDeposit: REFUND_PERCENT.cancel },
+      });
+    }
+
+    emitUserRealtime(req.user._id, REALTIME_EVENTS.BOOKING_CHANGED, {
+      action: "cancelled",
+      bookingId: refundedBooking._id,
+      refundAmount: refundedBooking.refundAmount,
+    });
+    if (refundedBooking.hotelId || refundedBooking.preferredHotelId) {
+      emitHotelRealtime(refundedBooking.hotelId || refundedBooking.preferredHotelId, REALTIME_EVENTS.BOOKING_CHANGED, {
+        action: "cancelled",
+        bookingId: refundedBooking._id,
+        refundAmount: refundedBooking.refundAmount,
+      });
+    }
+
+    return res.json({
+      message: `Booking cancelled. Refund approved for ${refundedBooking.refundAmount.toLocaleString()} RWF.`,
+      booking: refundedBooking,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to cancel booking.", error: error.message });
+  }
+};
+
+const runBookingNoActionRefundCleanup = async ({ now = new Date() } = {}) => {
+  const summary = { noActionRefunded: 0 };
+  const bookings = await Booking.find({
+    paymentStatus: { $in: DEPOSIT_PAID_STATUSES },
+    status: { $nin: ["cancelled", "completed", "rejected"] },
+    refundStatus: { $in: ["none", null] },
+    originalBookingId: null,
+  });
+
+  for (const booking of bookings) {
+    if (booking.refundStatus === "not_applicable" || booking.rebookRequestId) continue;
+    const deadline = resolveBookingActionDeadline(booking);
+    if (!deadline || deadline > now) continue;
+    await applyBookingRefund({
+      booking,
+      refundPercentOfDeposit: REFUND_PERCENT.noAction,
+      refundReason: "No customer action before the allowed time.",
+      cancellationReason: "No-action refund applied automatically.",
+      now,
+    });
+    summary.noActionRefunded += 1;
+  }
+
+  return summary;
+};
+
 module.exports = {
   createBookingRequest,
   listMyBookings,
   payBooking,
+  cancelBooking,
   downloadReceipt,
+  runBookingNoActionRefundCleanup,
+  calculateDepositAmount,
+  calculateRefundAmount,
+  hasDepositPaid,
 };

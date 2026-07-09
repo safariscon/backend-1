@@ -71,8 +71,14 @@ const hotelSchema = new mongoose.Schema(
       enabled: { type: Boolean, default: false, index: true },
       title: { type: String, default: "", trim: true, maxlength: 100 },
       description: { type: String, default: "", trim: true, maxlength: 500 },
+      percent: { type: Number, default: 0, min: 0, max: 100 },
+      note: { type: String, default: "", trim: true, maxlength: 500 },
       startAt: { type: Date, default: null },
       endAt: { type: Date, default: null },
+    },
+    rebookSettings: {
+      requestDeadlineHours: { type: Number, default: 24, min: 0, max: 2160 },
+      rebookIdValidityHours: { type: Number, default: 72, min: 1, max: 2160 },
     },
     promotionHistory: {
       type: [

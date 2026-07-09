@@ -25,17 +25,59 @@ const connectDB = require("./config/db");
 const seedAdmin = require("./utils/seedAdmin");
 const { initRealtime } = require("./utils/realtime");
 const { setDbReady } = require("./middleware/databaseMiddleware");
+const { runRebookExpiryCleanup } = require("./controllers/rebookController");
+const { runBookingNoActionRefundCleanup } = require("./controllers/bookingController");
 
 const PORT = process.env.PORT || 5000;
+const REBOOK_EXPIRY_INTERVAL_MS = 5 * 60 * 1000;
 const isProduction = process.env.NODE_ENV === "production";
 const requireDbOnStartup =
   String(process.env.REQUIRE_DB_ON_STARTUP || (isProduction ? "true" : "false")).toLowerCase() ===
   "true";
 
+const logRebookExpirySummary = (summary) => {
+  const total =
+    Number(summary?.pendingExpired || 0) +
+    Number(summary?.cancelExpired || 0) +
+    Number(summary?.generatedIdExpired || 0);
+  if (!total) return;
+  console.log(
+    `Re-book cleanup expired ${total} request(s): pending=${summary.pendingExpired}, cancel=${summary.cancelExpired}, generatedId=${summary.generatedIdExpired}`
+  );
+};
+
+const logBookingRefundSummary = (summary) => {
+  const total = Number(summary?.noActionRefunded || 0);
+  if (!total) return;
+  console.log(`Booking refund cleanup applied ${total} no-action refund(s).`);
+};
+
+const startRebookExpiryCleanup = () => {
+  let isRunning = false;
+
+  const run = async () => {
+    if (isRunning) return;
+    isRunning = true;
+    try {
+      logRebookExpirySummary(await runRebookExpiryCleanup());
+      logBookingRefundSummary(await runBookingNoActionRefundCleanup());
+    } catch (error) {
+      console.warn("Re-book cleanup failed:", error.message);
+    } finally {
+      isRunning = false;
+    }
+  };
+
+  run();
+  return setInterval(run, REBOOK_EXPIRY_INTERVAL_MS);
+};
+
 const startServer = async () => {
+  let databaseReady = false;
   try {
     await connectDB();
     setDbReady(true);
+    databaseReady = true;
     await seedAdmin();
   } catch (error) {
     setDbReady(false, error.message);
@@ -55,6 +97,7 @@ const startServer = async () => {
   try {
     const server = http.createServer(app);
     initRealtime(server);
+    if (databaseReady) startRebookExpiryCleanup();
 
     server.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);

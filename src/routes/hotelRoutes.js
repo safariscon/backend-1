@@ -5,6 +5,8 @@ const {
   listMyRooms,
   listMyServices,
   updateBookingStatus,
+  verifyBookingCodeForCompletion,
+  completeVerifiedBooking,
   createRoom,
   updateRoom,
   upsertMyService,
@@ -20,6 +22,8 @@ const router = express.Router();
 
 router.get("/overview", protect, sellerOnly, getMyHotelOverview);
 router.get("/bookings", protect, sellerOnly, listMyBookings);
+router.post("/bookings/verify-code", protect, sellerOnly, verifyBookingCodeForCompletion);
+router.post("/bookings/complete-verified", protect, sellerOnly, completeVerifiedBooking);
 router.get("/booking-verification/:lookup", protect, sellerOnly, verifyMyBooking);
 router.put("/bookings/:bookingId/status", protect, sellerOnly, updateBookingStatus);
 router.get("/rooms", protect, sellerOnly, listMyRooms);

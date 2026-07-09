@@ -17,6 +17,8 @@ const {
 } = require("../services/marketplaceService");
 const { clearCache } = require("../utils/cache");
 
+const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
+
 const ensureHotelUser = (req, res) => {
   if (!["hotel", "supplier"].includes(req.user?.role)) {
     res.status(403).json({ message: "Seller role required." });
@@ -32,6 +34,37 @@ const sellerBusinessFilter = (req) => ({
     ...(req.user.hotelId ? [{ _id: req.user.hotelId }] : []),
   ],
 });
+
+const getSellerBusinessIds = async (req) => Hotel.find(sellerBusinessFilter(req)).distinct("_id");
+
+const normalizeBookingCode = (value) => String(value || "").trim().toUpperCase();
+
+const getRemainingAmount = (booking) => {
+  const finalPrice = Number(booking.priceSnapshot?.finalPrice || booking.totalPrice || 0);
+  const deposit = Number(booking.depositAmount || booking.amountPaid || Math.round(finalPrice * 0.3));
+  return Math.max(0, Math.round(finalPrice - deposit));
+};
+
+const buildCompletionSummary = (booking) => ({
+  bookingId: booking._id,
+  customerName: booking.touristId?.name || booking.bookingDetails?.fullName || "Customer",
+  serviceName: booking.bookingDetails?.requestedService || booking.bookingDetails?.serviceName || booking.destinationPlace,
+  businessName: booking.hotelId?.name || booking.preferredHotelId?.name || "Service",
+  bookingDate: booking.bookingDetails?.bookingDate || booking.checkIn || booking.createdAt,
+  depositAmount: Number(booking.depositAmount || booking.amountPaid || 0),
+  remainingAmount: getRemainingAmount(booking),
+  bookingStatus: booking.status,
+  paymentStatus: booking.paymentStatus,
+});
+
+const sanitizeSellerBooking = (booking) => {
+  const data = typeof booking?.toObject === "function" ? booking.toObject() : { ...(booking || {}) };
+  delete data.bookingCode;
+  delete data.verificationCode;
+  delete data.verificationToken;
+  delete data.qrPayload;
+  return data;
+};
 
 const normalizeAvailabilityTable = (table) => {
   const columns = [
@@ -187,9 +220,10 @@ const listMyBookings = async (req, res) => {
       .populate("hotelId", "name location type ownerEmail")
       .populate("roomId", "roomNumber type price status")
       .populate("tourHelpers", "name phone email")
+      .populate("completedBySeller", "name email sellerId")
       .sort({ createdAt: -1 });
 
-    return res.json({ bookings });
+    return res.json({ bookings: bookings.map(sanitizeSellerBooking) });
   } catch (error) {
     return res.status(500).json({
       message: "Failed to fetch hotel bookings.",
@@ -399,7 +433,7 @@ const updateBookingStatus = async (req, res) => {
 
     const { bookingId } = req.params;
     const { status } = req.body;
-    const allowedStatuses = ["confirmed", "cancelled", "completed"];
+    const allowedStatuses = ["confirmed", "cancelled"];
 
     if (!allowedStatuses.includes(status)) {
       return res.status(400).json({
@@ -449,6 +483,132 @@ const updateBookingStatus = async (req, res) => {
   }
 };
 
+const verifyBookingCodeForCompletion = async (req, res) => {
+  try {
+    if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
+    const code = normalizeBookingCode(req.body.code);
+    if (!code) return res.status(400).json({ message: "Booking Code is required." });
+
+    const businessIds = await getSellerBusinessIds(req);
+    const booking = await Booking.findOne({
+      bookingCode: code,
+      $or: [{ hotelId: { $in: businessIds } }, { preferredHotelId: { $in: businessIds } }],
+    })
+      .populate("touristId", "name email")
+      .populate("hotelId", "name")
+      .populate("preferredHotelId", "name");
+
+    if (!booking) return res.status(404).json({ message: "Booking Code is invalid for your business." });
+    if (!DEPOSIT_PAID_STATUSES.includes(booking.paymentStatus) || booking.detailsUnlocked !== true) {
+      return res.status(409).json({ message: "This booking is not eligible. The 30% deposit must be paid first." });
+    }
+    if (["cancelled", "rejected", "completed"].includes(booking.status) || booking.completionStatus === "completed") {
+      return res.status(409).json({ message: "This booking cannot be completed in its current status." });
+    }
+    if (booking.bookingCodeUsed === true) {
+      return res.status(409).json({ message: "This Booking Code has already been used." });
+    }
+
+    return res.json({ valid: true, booking: buildCompletionSummary(booking) });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to verify Booking Code.", error: error.message });
+  }
+};
+
+const completeVerifiedBooking = async (req, res) => {
+  try {
+    if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
+    const code = normalizeBookingCode(req.body.code);
+    const bookingId = String(req.body.bookingId || "").trim();
+    if (!bookingId || !code) return res.status(400).json({ message: "Booking ID and Booking Code are required." });
+    if (req.body.confirmRemainingPaid !== true) {
+      return res.status(400).json({ message: "Confirm that the remaining 70% was paid to the seller." });
+    }
+
+    const businessIds = await getSellerBusinessIds(req);
+    const current = await Booking.findOne({
+      _id: bookingId,
+      bookingCode: code,
+      $or: [{ hotelId: { $in: businessIds } }, { preferredHotelId: { $in: businessIds } }],
+      bookingCodeUsed: { $ne: true },
+      status: { $nin: ["cancelled", "rejected", "completed"] },
+      completionStatus: { $ne: "completed" },
+      paymentStatus: { $in: DEPOSIT_PAID_STATUSES },
+      detailsUnlocked: true,
+    }).select("totalPrice priceSnapshot depositAmount amountPaid remainingBalance");
+
+    if (!current) {
+      return res.status(409).json({ message: "Booking cannot be completed. Verify the Booking Code again or check its status." });
+    }
+
+    const now = new Date();
+    const remainingAmount = getRemainingAmount(current);
+    const completed = await Booking.findOneAndUpdate(
+      {
+        _id: current._id,
+        bookingCode: code,
+        $or: [{ hotelId: { $in: businessIds } }, { preferredHotelId: { $in: businessIds } }],
+        bookingCodeUsed: { $ne: true },
+        status: { $nin: ["cancelled", "rejected", "completed"] },
+        completionStatus: { $ne: "completed" },
+        paymentStatus: { $in: DEPOSIT_PAID_STATUSES },
+        detailsUnlocked: true,
+      },
+      {
+        $set: {
+          status: "completed",
+          paymentStatus: "completed",
+          completionStatus: "completed",
+          remainingPaymentStatus: "paid_to_seller",
+          remainingAmount,
+          remainingBalance: 0,
+          bookingCodeUsed: true,
+          bookingCodeUsedAt: now,
+          completedAt: now,
+          completedBySeller: req.user._id,
+        },
+        $push: {
+          completionAuditLogs: {
+            event: "booking_completed",
+            message: "Seller verified Booking Code and confirmed remaining 70% paid.",
+            actorId: req.user._id,
+            actorRole: req.user.role,
+            at: now,
+          },
+        },
+      },
+      { new: true, runValidators: true }
+    )
+      .populate("touristId", "name email")
+      .populate("hotelId", "name")
+      .populate("preferredHotelId", "name")
+      .populate("completedBySeller", "name email sellerId");
+
+    if (!completed) {
+      return res.status(409).json({ message: "This Booking Code was already used." });
+    }
+
+    emitUserRealtime(completed.touristId?._id || completed.touristId, REALTIME_EVENTS.BOOKING_CHANGED, {
+      action: "completed",
+      bookingId: completed._id,
+      status: completed.status,
+    });
+    emitHotelRealtime(completed.hotelId?._id || completed.hotelId || completed.preferredHotelId?._id || completed.preferredHotelId, REALTIME_EVENTS.BOOKING_CHANGED, {
+      action: "completed",
+      bookingId: completed._id,
+      status: completed.status,
+    });
+
+    return res.json({
+      message: "Booking completed. Booking Code is now used and cannot be reused.",
+      booking: buildCompletionSummary(completed),
+      completedBooking: completed,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to complete booking.", error: error.message });
+  }
+};
+
 const upsertMyService = async (req, res) => {
   try {
     if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
@@ -488,16 +648,28 @@ const upsertMyService = async (req, res) => {
     const promotionInput = req.body.promotion && typeof req.body.promotion === "object"
       ? req.body.promotion
       : {};
+    const promotionPercent = Number(
+      req.body.promotionPercent ??
+      req.body.promotionPercentOfPrice ??
+      promotionInput.percent ??
+      promotionInput.promotionPercent ??
+      0
+    );
     const promotion = {
-      enabled: promotionInput.enabled === true,
-      title: String(promotionInput.title || "").trim(),
-      description: String(promotionInput.description || "").trim(),
-      startAt: promotionInput.startAt ? new Date(promotionInput.startAt) : null,
-      endAt: promotionInput.endAt ? new Date(promotionInput.endAt) : null,
+      enabled: req.body.promotionEnabled === true || promotionInput.enabled === true,
+      title: String(req.body.promotionTitle || promotionInput.title || "").trim(),
+      description: String(req.body.promotionNote || promotionInput.note || promotionInput.description || "").trim(),
+      percent: Number.isFinite(promotionPercent) ? promotionPercent : 0,
+      note: String(req.body.promotionNote || promotionInput.note || promotionInput.description || "").trim(),
+      startAt: (req.body.promotionStartAt || promotionInput.startAt) ? new Date(req.body.promotionStartAt || promotionInput.startAt) : null,
+      endAt: (req.body.promotionEndAt || promotionInput.endAt) ? new Date(req.body.promotionEndAt || promotionInput.endAt) : null,
     };
     if (promotion.enabled) {
-      if (!promotion.title || !promotion.description || !promotion.startAt || !promotion.endAt) {
-        return res.status(400).json({ message: "Promotion title, description, start time, and end time are required." });
+      if (!promotion.title || !promotion.startAt || !promotion.endAt) {
+        return res.status(400).json({ message: "Promotion title, start time, and end time are required." });
+      }
+      if (!Number.isFinite(promotion.percent) || promotion.percent <= 0 || promotion.percent > 100) {
+        return res.status(400).json({ message: "Promotion percent must be greater than 0 and less than or equal to 100." });
       }
       if (Number.isNaN(promotion.startAt.getTime()) || Number.isNaN(promotion.endAt.getTime())) {
         return res.status(400).json({ message: "Promotion start and end times must be valid." });
@@ -506,6 +678,12 @@ const upsertMyService = async (req, res) => {
         return res.status(400).json({ message: "Promotion end time must be after its start time." });
       }
     }
+    const requestDeadlineHours = Math.max(0, Math.min(2160, Number(req.body.rebookSettings?.requestDeadlineHours ?? 24)));
+    const rebookIdValidityHours = Math.max(1, Math.min(2160, Number(req.body.rebookSettings?.rebookIdValidityHours ?? 72)));
+    if (!Number.isFinite(requestDeadlineHours) || !Number.isFinite(rebookIdValidityHours)) {
+      return res.status(400).json({ message: "Enter valid Re-book deadline hours." });
+    }
+    const rebookSettings = { requestDeadlineHours, rebookIdValidityHours };
     const inventoryStatus = resolveInventoryStatus({
       status: normalizedStatus,
       quantity,
@@ -530,6 +708,7 @@ const upsertMyService = async (req, res) => {
         existingPromotion.enabled !== true ||
         existingPromotion.title !== promotion.title ||
         existingPromotion.description !== promotion.description ||
+        Number(existingPromotion.percent || 0) !== promotion.percent ||
         new Date(existingPromotion.startAt || 0).getTime() !== promotion.startAt.getTime() ||
         new Date(existingPromotion.endAt || 0).getTime() !== promotion.endAt.getTime()
       );
@@ -546,6 +725,7 @@ const upsertMyService = async (req, res) => {
             priceText: "",
             images,
             promotion,
+            rebookSettings,
             ...(req.body.contactDetails && typeof req.body.contactDetails === "object"
               ? {
                   "contactDetails.phone": String(req.body.contactDetails.phone || "").trim(),
@@ -604,6 +784,7 @@ const upsertMyService = async (req, res) => {
       payoutDetails,
       images,
       promotion,
+      rebookSettings,
       promotionHistory: promotion.enabled ? [{ ...promotion, recordedAt: new Date() }] : [],
       services: [String(category).trim()],
       ownerEmail: `${req.user.sellerId || req.user._id}-${Date.now()}@seller.local`.toLowerCase(),
@@ -745,7 +926,7 @@ const verifyMyBooking = async (req, res) => {
       .populate("roomId", "roomNumber type price status");
 
     if (!booking) return res.status(404).json({ message: "Booking not found for your business." });
-    return res.json({ booking });
+    return res.json({ booking: sanitizeSellerBooking(booking) });
   } catch (error) {
     return res.status(500).json({ message: "Failed to verify booking.", error: error.message });
   }
@@ -759,6 +940,8 @@ module.exports = {
   listMyRooms,
   listMyServices,
   updateBookingStatus,
+  verifyBookingCodeForCompletion,
+  completeVerifiedBooking,
   createRoom,
   updateRoom,
   upsertMyService,

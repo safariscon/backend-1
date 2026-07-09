@@ -10,6 +10,7 @@ const { REALTIME_EVENTS, emitHotelRealtime, emitRealtime, emitUserRealtime } = r
 const DEFAULT_SETTINGS = Object.freeze({ requestDeadlineHours: 24, rebookIdValidityHours: 72 });
 const ACTIVE_REBOOK_STATUSES = ["pending", "approved", "rebook_id_generated"];
 const INELIGIBLE_BOOKING_STATUSES = ["completed", "cancelled", "rejected"];
+const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
 
 const cleanReason = (value) => String(value || "").trim().replace(/\s+/g, " ").slice(0, 1500);
 const normalizeCode = (value) => String(value || "").trim().toUpperCase();
@@ -21,15 +22,22 @@ const timeline = (event, actor, message = "") => ({
   at: new Date(),
 });
 
-const getRebookSettings = async () => {
-  const setting = await SiteSetting.findOne({ key: "rebook-settings" }).lean();
-  const value = setting?.value || {};
+const normalizeRebookSettings = (value = {}) => {
   const configuredDeadline = Number(value.requestDeadlineHours);
   const configuredValidity = Number(value.rebookIdValidityHours);
   return {
     requestDeadlineHours: Math.max(0, Math.min(2160, Number.isFinite(configuredDeadline) ? configuredDeadline : DEFAULT_SETTINGS.requestDeadlineHours)),
     rebookIdValidityHours: Math.max(1, Math.min(2160, Number.isFinite(configuredValidity) && configuredValidity > 0 ? configuredValidity : DEFAULT_SETTINGS.rebookIdValidityHours)),
   };
+};
+
+const getRebookSettings = async (serviceId = null) => {
+  if (serviceId) {
+    const service = await Hotel.findById(serviceId).select("rebookSettings").lean();
+    if (service?.rebookSettings) return normalizeRebookSettings(service.rebookSettings);
+  }
+  const setting = await SiteSetting.findOne({ key: "rebook-settings" }).lean();
+  return normalizeRebookSettings(setting?.value || {});
 };
 
 const resolveBookingDate = (booking) => {
@@ -60,24 +68,98 @@ const notifyChange = (request, action) => {
   emitRealtime(REALTIME_EVENTS.NOTIFICATION, payload);
 };
 
+const expireOneRequest = async ({ request, message, action = "expired" }) => {
+  const expiredRequest = await RebookRequest.findOneAndUpdate(
+    { _id: request._id, status: request.status, usedAt: null },
+    {
+      $set: { status: "expired" },
+      $unset: { activeKey: 1, redemptionClaimToken: 1, redemptionClaimExpiresAt: 1 },
+      $push: { auditLogs: timeline("request_expired", null, message) },
+    },
+    { new: true }
+  );
+  if (!expiredRequest) return null;
+  await writeAudit({ action: "rebook-request-expired", request: expiredRequest });
+  notifyChange(expiredRequest, action);
+  return expiredRequest;
+};
+
+const sendDeadlineReminder = async ({ request, now }) => {
+  const remindedRequest = await RebookRequest.findOneAndUpdate(
+    {
+      _id: request._id,
+      status: request.status,
+      reminderSent: { $ne: true },
+      deadlineAt: { $gt: now },
+      usedAt: null,
+    },
+    {
+      $set: { reminderSent: true, reminderSentAt: now },
+      $push: { auditLogs: timeline("deadline_reminder_sent", null, "Customer was reminded before the booking change deadline.") },
+    },
+    { new: true }
+  );
+  if (!remindedRequest) return null;
+  notifyChange(remindedRequest, "deadline-reminder");
+  return remindedRequest;
+};
+
 const expireRequests = async (filter = {}) => {
   const now = new Date();
-  const expired = await RebookRequest.find({
+  const summary = await runRebookExpiryCleanup({ filter, now });
+  return summary;
+};
+
+const runRebookExpiryCleanup = async ({ filter = {}, now = new Date() } = {}) => {
+  const summary = { pendingExpired: 0, cancelExpired: 0, generatedIdExpired: 0 };
+
+  const reminderDue = await RebookRequest.find({
+    ...filter,
+    status: { $in: ["pending", "cancel_requested"] },
+    deadlineAt: { $gt: now },
+    reminderSent: { $ne: true },
+    usedAt: null,
+  });
+
+  for (const request of reminderDue) {
+    await sendDeadlineReminder({ request, now });
+  }
+
+  const deadlineExpired = await RebookRequest.find({
+    ...filter,
+    status: { $in: ["pending", "cancel_requested"] },
+    deadlineAt: { $lte: now },
+    usedAt: null,
+  });
+
+  for (const request of deadlineExpired) {
+    const expiredRequest = await expireOneRequest({
+      request,
+      message: "The booking change request deadline passed before admin approval.",
+      action: "deadline-expired",
+    });
+    if (!expiredRequest) continue;
+    if (request.requestType === "cancel" || request.status === "cancel_requested") summary.cancelExpired += 1;
+    else summary.pendingExpired += 1;
+  }
+
+  const generatedIdExpired = await RebookRequest.find({
     ...filter,
     status: { $in: ["approved", "rebook_id_generated"] },
     expiresAt: { $ne: null, $lte: now },
     usedAt: null,
   });
-  for (const request of expired) {
-    request.status = "expired";
-    request.activeKey = undefined;
-    request.redemptionClaimToken = "";
-    request.redemptionClaimExpiresAt = null;
-    request.auditLogs.push(timeline("request_expired", null, "The Re-book ID reached its expiry time."));
-    await request.save();
-    await writeAudit({ action: "rebook-request-expired", request });
-    notifyChange(request, "expired");
+
+  for (const request of generatedIdExpired) {
+    const expiredRequest = await expireOneRequest({
+      request,
+      message: "The Re-book ID reached its expiry time.",
+    });
+    if (!expiredRequest) continue;
+    summary.generatedIdExpired += 1;
   }
+
+  return summary;
 };
 
 const populateRequest = (query) => query
@@ -109,7 +191,7 @@ const createRequest = async (req, res) => {
 
     const booking = await Booking.findOne({ _id: originalBookingId, touristId: req.user._id });
     if (!booking) return res.status(404).json({ message: "Booking not found or does not belong to this customer." });
-    if (!["deposit-paid", "paid"].includes(booking.paymentStatus)) {
+    if (!DEPOSIT_PAID_STATUSES.includes(booking.paymentStatus)) {
       return res.status(409).json({ message: "A paid deposit is required before requesting a booking change." });
     }
     if (INELIGIBLE_BOOKING_STATUSES.includes(booking.status)) {
@@ -123,7 +205,7 @@ const createRequest = async (req, res) => {
 
     const bookingDate = resolveBookingDate(booking);
     if (!bookingDate) return res.status(409).json({ message: "The original booking has no valid service date." });
-    const settings = await getRebookSettings();
+    const settings = await getRebookSettings(serviceId);
     const deadlineAt = new Date(bookingDate.getTime() - settings.requestDeadlineHours * 60 * 60 * 1000);
     if (Date.now() > deadlineAt.getTime()) {
       return res.status(409).json({ message: `The change deadline passed ${settings.requestDeadlineHours} hours before the booking date.` });
@@ -237,7 +319,7 @@ const approveRequest = async (req, res) => {
     let update;
     if (current.requestType === "rebook") {
       if (current.status !== "pending") return res.status(409).json({ message: "Only pending Re-book requests can be approved." });
-      const settings = await getRebookSettings();
+      const settings = await getRebookSettings(current.serviceId);
       update = {
         $set: { status: "rebook_id_generated", rebookId: await createUniqueRebookId(), approvedAt: now, expiresAt: new Date(now.getTime() + settings.rebookIdValidityHours * 3600000), adminReviewedBy: req.user._id },
         $push: { auditLogs: { $each: [timeline("admin_approved", req.user, "Admin approved the Re-book request."), timeline("rebook_id_generated", req.user, "A one-time Re-book ID was generated.")] } },
@@ -442,6 +524,7 @@ module.exports = {
   markSellerNotified,
   getSettings,
   updateSettings,
+  runRebookExpiryCleanup,
   claimRebookId,
   finalizeRebookIdUse,
   releaseRebookIdClaim,

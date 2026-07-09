@@ -15,6 +15,10 @@ const app = express();
 const parseOrigins = () => {
   const configuredOrigins = (
     process.env.CORS_ORIGINS ||
+    process.env.CLIENT_URL ||
+    process.env.FLUTTER_WEB_URL ||
+    process.env.WEB_APP_URL ||
+    process.env.MOBILE_APP_URL ||
     process.env.FRONTEND_URL ||
     process.env.PUBLIC_FRONTEND_URL ||
     ""
@@ -26,7 +30,9 @@ const parseOrigins = () => {
   return [...new Set([
     ...configuredOrigins,
     "http://localhost:5173",
+    "http://localhost:5174",
     "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
     "http://localhost:4173",
     "http://127.0.0.1:4173",
   ])];
@@ -39,9 +45,18 @@ app.use(
   cors({
     origin(origin, callback) {
       if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+      if (
+        process.env.NODE_ENV !== "production" &&
+        (origin.startsWith("http://localhost:") ||
+          origin.startsWith("http://127.0.0.1:"))
+      ) {
+        return callback(null, true);
+      }
       return callback(new Error(`CORS blocked origin: ${origin}`));
     },
     credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 app.use(express.json({ limit: "1mb" }));
@@ -68,6 +83,7 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/bookings", bookingRoutes);
 app.use("/api/rebook", rebookRoutes);
 app.use("/api/hotel", hotelRoutes);
+app.use("/api/seller", hotelRoutes);
 app.use("/api", publicRoutes);
 
 app.use((req, res) => {

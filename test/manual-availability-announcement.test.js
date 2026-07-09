@@ -73,7 +73,8 @@ test("booking stores the promotion that was active when the customer booked", as
     promotion: {
       enabled: true,
       title: "Happy Hour",
-      description: "Buy 3 bottles and get 1 free.",
+      percent: 25,
+      note: "Save on happy hour.",
       startAt: new Date(now - 60_000),
       endAt: new Date(now + 60_000),
     },
@@ -102,5 +103,6 @@ test("booking stores the promotion that was active when the customer booked", as
 
   assert.equal(result.statusCode, 201);
   assert.equal(createdBooking.promotionSnapshot.title, "Happy Hour");
-  assert.match(createdBooking.promotionSnapshot.description, /get 1 free/i);
+  assert.equal(createdBooking.promotionSnapshot.percent, 25);
+  assert.match(createdBooking.promotionSnapshot.note, /happy hour/i);
 });

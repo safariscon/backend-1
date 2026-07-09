@@ -51,6 +51,8 @@ const rebookRequestSchema = new mongoose.Schema(
     refundReference: { type: String, default: "", trim: true },
     sellerNotified: { type: Boolean, default: false, index: true },
     sellerNotifiedAt: { type: Date, default: null },
+    reminderSent: { type: Boolean, default: false, index: true },
+    reminderSentAt: { type: Date, default: null },
     sellerConfirmedUnavailable: { type: Boolean, default: false },
     sellerConfirmedUnavailableAt: { type: Date, default: null },
     adminReviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
