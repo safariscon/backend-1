@@ -260,6 +260,9 @@ const approveBooking = async (req, res) => {
     booking.depositAmount = Math.round((booking.totalPrice * depositPercentage) / 100);
     booking.remainingBalance = Math.max(0, booking.totalPrice - booking.depositAmount);
     booking.detailsUnlocked = false;
+    booking.depositPaid = false;
+    booking.locationUnlocked = false;
+    booking.locationUnlockedAt = null;
     booking.commissionPercentage = commissionPercentage;
     booking.commissionAmount = Math.round((booking.totalPrice * commissionPercentage) / 100);
     booking.paymentReason = paymentReason;

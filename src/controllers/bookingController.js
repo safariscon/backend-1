@@ -37,6 +37,68 @@ const REFUND_PERCENT = Object.freeze({ cancel: 20, noAction: 15 });
 
 const hasDepositPaid = (booking) => Boolean(booking?.detailsUnlocked) || DEPOSIT_PAID_STATUSES.includes(booking?.paymentStatus);
 
+const locationIsUnlockedForCustomer = (booking, customerId) =>
+  String(booking?.touristId?._id || booking?.touristId || "") === String(customerId || "") &&
+  booking?.depositPaid === true &&
+  booking?.locationUnlocked === true;
+
+const getPublicLocation = (business = {}) => {
+  const source = business.serviceLocation || business.locationDetails || {};
+  return {
+    country: "Rwanda",
+    province: source.province || business.locationDetails?.province || "",
+    district: source.district || business.locationDetails?.district || "",
+    sector: source.sector || business.locationDetails?.sector || "",
+    message: "Pay 30% deposit to unlock exact location and directions.",
+  };
+};
+
+const getUnlockedServiceLocation = (business = {}) => {
+  const source = business.serviceLocation || {};
+  const contactDetails = business.contactDetails || {};
+  return {
+    country: "Rwanda",
+    province: source.province || business.locationDetails?.province || "",
+    district: source.district || business.locationDetails?.district || "",
+    sector: source.sector || business.locationDetails?.sector || "",
+    cell: source.cell || business.locationDetails?.cell || "",
+    village: source.village || business.locationDetails?.village || "",
+    fullAddress: source.fullAddress || contactDetails.exactAddress || business.location || "",
+    latitude: source.latitude ?? contactDetails.latitude ?? null,
+    longitude: source.longitude ?? contactDetails.longitude ?? null,
+    locationSource: source.locationSource || "admin_manual",
+    isExactLocationVerified: Boolean(source.isExactLocationVerified),
+  };
+};
+
+const sanitizeBusinessLocationForCustomer = (business, booking, customerId) => {
+  if (!business) return business;
+  const exactUnlocked = locationIsUnlockedForCustomer(booking, customerId);
+  const sanitized = { ...business };
+  sanitized.publicLocation = getPublicLocation(business);
+  sanitized.serviceLocation = exactUnlocked ? getUnlockedServiceLocation(business) : sanitized.publicLocation;
+  sanitized.locationDetails = exactUnlocked
+    ? {
+        province: sanitized.serviceLocation.province,
+        district: sanitized.serviceLocation.district,
+        sector: sanitized.serviceLocation.sector,
+        cell: sanitized.serviceLocation.cell,
+        village: sanitized.serviceLocation.village,
+      }
+    : {
+        province: sanitized.publicLocation.province,
+        district: sanitized.publicLocation.district,
+        sector: sanitized.publicLocation.sector,
+      };
+  if (!exactUnlocked) {
+    delete sanitized.contactInfo;
+    delete sanitized.contactDetails;
+    delete sanitized.ownerEmail;
+    delete sanitized.sellerContactEmail;
+  }
+  return sanitized;
+};
+
 const calculateDepositAmount = (totalPrice, depositPercent = DEPOSIT_PERCENT) =>
   Math.round((Math.max(0, Number(totalPrice || 0)) * Math.max(0, Number(depositPercent || 0))) / 100);
 
@@ -61,9 +123,11 @@ const resolveBookingActionDeadline = (booking) => {
 
 const buildLockedBusiness = (sourceBusiness, booking) => {
   if (!sourceBusiness) return null;
+  const publicLocation = getPublicLocation(sourceBusiness);
   const locationDetails = {
-    district: sourceBusiness.locationDetails?.district || sourceBusiness.district || "",
-    sector: sourceBusiness.locationDetails?.sector || sourceBusiness.sector || "",
+    province: publicLocation.province,
+    district: publicLocation.district || sourceBusiness.district || "",
+    sector: publicLocation.sector || sourceBusiness.sector || "",
   };
   return {
     _id: sourceBusiness._id,
@@ -73,6 +137,8 @@ const buildLockedBusiness = (sourceBusiness, booking) => {
     services: sourceBusiness.services || [],
     images: sourceBusiness.images || [],
     location: locationDetails.district || sourceBusiness.location || "District available after seller updates location",
+    publicLocation,
+    serviceLocation: publicLocation,
     locationDetails,
     district: locationDetails.district,
     sector: locationDetails.sector,
@@ -302,6 +368,9 @@ const createBookingRequest = async (req, res) => {
       amountPaid: rebookOriginalBooking ? getPaidDepositAmount(rebookOriginalBooking) : 0,
       paymentStatus: rebookOriginalBooking ? "deposit_paid" : paymentStatus,
       detailsUnlocked: Boolean(rebookOriginalBooking),
+      depositPaid: Boolean(rebookOriginalBooking),
+      locationUnlocked: Boolean(rebookOriginalBooking),
+      locationUnlockedAt: rebookOriginalBooking ? new Date() : null,
       refundStatus: rebookOriginalBooking ? "not_applicable" : "none",
       refundAmount: 0,
       refundReason: rebookOriginalBooking ? "Deposit transferred to successful re-booking." : "",
@@ -471,6 +540,13 @@ const payBooking = async (req, res) => {
       return res.status(409).json({ message: "This automatic quote expired and its availability was released. Please make a new booking." });
     }
     if (hasDepositPaid(booking)) {
+      if (booking.depositPaid !== true || booking.locationUnlocked !== true || !booking.locationUnlockedAt) {
+        booking.depositPaid = true;
+        booking.detailsUnlocked = true;
+        booking.locationUnlocked = true;
+        booking.locationUnlockedAt = booking.locationUnlockedAt || new Date();
+        await booking.save();
+      }
       const transaction = await Transaction.findOne({ bookingId: booking._id, status: "paid" }).sort({ createdAt: -1 });
       return res.json({
         message: "Payment was already recorded.",
@@ -531,6 +607,9 @@ const payBooking = async (req, res) => {
           depositAmount: amount,
           remainingBalance: Math.max(0, exactTotal - amount),
           detailsUnlocked: true,
+          depositPaid: true,
+          locationUnlocked: true,
+          locationUnlockedAt: new Date(),
           status: booking.bookingMode === "automatic" ? "provider-details-unlocked" : booking.status,
           "availabilityReservation.status": booking.bookingMode === "automatic" ? "paid" : booking.availabilityReservation?.status,
           qrPayload,
@@ -721,16 +800,29 @@ const listMyBookings = async (req, res) => {
 
     const bookings = await Booking.find({ touristId: req.user._id })
       .populate("touristId", "name email")
-      .populate("preferredHotelId", "name type location locationDetails contactInfo contactDetails ownerEmail sellerContactEmail images description availabilityTable bookingRules services")
-      .populate("hotelId", "name type location locationDetails contactInfo contactDetails ownerEmail sellerContactEmail images description availabilityTable bookingRules services")
+      .populate("preferredHotelId", "name type location locationDetails serviceLocation contactInfo contactDetails ownerEmail sellerContactEmail images description availabilityTable bookingRules services")
+      .populate("hotelId", "name type location locationDetails serviceLocation contactInfo contactDetails ownerEmail sellerContactEmail images description availabilityTable bookingRules services")
       .populate("roomId", "roomNumber type price status")
       .populate("tourHelpers", "name phone email")
       .sort({ createdAt: -1 });
 
     const customerBookings = bookings.map((bookingDocument) => {
       const booking = bookingDocument.toObject();
+      const exactLocationUnlocked = locationIsUnlockedForCustomer(booking, req.user._id);
       if (hasDepositPaid(booking)) {
-        return { ...booking, detailsUnlocked: true, providerDetailsUnlocked: true };
+        const sanitizedHotel = sanitizeBusinessLocationForCustomer(booking.hotelId, booking, req.user._id);
+        const sanitizedPreferred = sanitizeBusinessLocationForCustomer(booking.preferredHotelId, booking, req.user._id);
+        const publicLocation = (sanitizedHotel || sanitizedPreferred)?.publicLocation || {};
+        return {
+          ...booking,
+          depositPaid: booking.depositPaid === true,
+          locationUnlocked: exactLocationUnlocked,
+          detailsUnlocked: true,
+          providerDetailsUnlocked: true,
+          destinationLocation: exactLocationUnlocked ? booking.destinationLocation : [publicLocation.province, publicLocation.district, publicLocation.sector].filter(Boolean).join(", "),
+          preferredHotelId: sanitizedPreferred,
+          hotelId: sanitizedHotel,
+        };
       }
 
       const sourceBusiness = booking.hotelId || booking.preferredHotelId;
@@ -740,6 +832,7 @@ const listMyBookings = async (req, res) => {
       return {
         ...booking,
         anonymousBusinessName: anonymousName,
+        destinationLocation: [hiddenBusiness?.publicLocation?.province, hiddenBusiness?.district, hiddenBusiness?.sector].filter(Boolean).join(", "),
         preferredHotelId: hiddenBusiness,
         hotelId: hiddenBusiness,
         tourHelpers: [],
@@ -748,8 +841,10 @@ const listMyBookings = async (req, res) => {
         lockedDetails: {
           visible: {
             publicServiceDetails: hiddenBusiness?.description || booking.destinationPlace,
+            province: hiddenBusiness?.publicLocation?.province || "",
             district: hiddenBusiness?.district || "",
             sector: hiddenBusiness?.sector || "",
+            message: "Pay 30% deposit to unlock exact location and directions.",
             price: Number(booking.totalPrice || hiddenBusiness?.basePrice || 0),
             depositAmountRequired: Number(booking.depositAmount || calculateDepositAmount(booking.totalPrice, booking.depositPercent || booking.depositPercentage || DEPOSIT_PERCENT)),
           },

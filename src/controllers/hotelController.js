@@ -39,6 +39,46 @@ const getSellerBusinessIds = async (req) => Hotel.find(sellerBusinessFilter(req)
 
 const normalizeBookingCode = (value) => String(value || "").trim().toUpperCase();
 
+const RWANDA_COORDINATE_BOUNDS = {
+  minLatitude: -2.9,
+  maxLatitude: -1.0,
+  minLongitude: 28.8,
+  maxLongitude: 31.0,
+};
+
+const isCoordinateInsideRwanda = (latitude, longitude) =>
+  Number.isFinite(latitude) &&
+  Number.isFinite(longitude) &&
+  latitude >= RWANDA_COORDINATE_BOUNDS.minLatitude &&
+  latitude <= RWANDA_COORDINATE_BOUNDS.maxLatitude &&
+  longitude >= RWANDA_COORDINATE_BOUNDS.minLongitude &&
+  longitude <= RWANDA_COORDINATE_BOUNDS.maxLongitude;
+
+const normalizeServiceLocation = (input = {}) => {
+  const latitude = input.latitude === "" || input.latitude === null || input.latitude === undefined ? null : Number(input.latitude);
+  const longitude = input.longitude === "" || input.longitude === null || input.longitude === undefined ? null : Number(input.longitude);
+  const locationSource = ["search", "map_click", "gps", "admin_manual"].includes(input.locationSource)
+    ? input.locationSource
+    : "map_click";
+
+  return {
+    country: "Rwanda",
+    province: String(input.province || "").trim(),
+    district: String(input.district || "").trim(),
+    sector: String(input.sector || "").trim(),
+    cell: String(input.cell || "").trim(),
+    village: String(input.village || "").trim(),
+    fullAddress: String(input.fullAddress || "").trim(),
+    latitude: Number.isFinite(latitude) ? latitude : null,
+    longitude: Number.isFinite(longitude) ? longitude : null,
+    locationSource,
+    isExactLocationVerified: Boolean(input.isExactLocationVerified),
+  };
+};
+
+const serviceLocationHasCoordinates = (serviceLocation) =>
+  Number.isFinite(serviceLocation.latitude) && Number.isFinite(serviceLocation.longitude);
+
 const getRemainingAmount = (booking) => {
   const finalPrice = Number(booking.priceSnapshot?.finalPrice || booking.totalPrice || 0);
   const deposit = Number(booking.depositAmount || booking.amountPaid || Math.round(finalPrice * 0.3));
@@ -620,16 +660,29 @@ const upsertMyService = async (req, res) => {
       return res.status(400).json({ message: "category and business name are required." });
     }
     const quantity = Math.max(0, Number(req.body.availableQuantity || req.body.quantityRemaining || 1));
-    const locationDetails = {
-      district: String(req.body.locationDetails?.district || "").trim(),
-      sector: String(req.body.locationDetails?.sector || "").trim(),
-      cell: String(req.body.locationDetails?.cell || "").trim(),
-      village: String(req.body.locationDetails?.village || "").trim(),
-    };
-    if (Object.values(locationDetails).some((value) => !value)) {
-      return res.status(400).json({ message: "District, sector, cell, and village are all required." });
+    const serviceLocation = normalizeServiceLocation(req.body.serviceLocation || req.body.locationDetails || {});
+    if (!serviceLocation.province || !serviceLocation.district || !serviceLocation.sector) {
+      return res.status(400).json({ message: "Province, district, and sector are required." });
     }
-    const fullLocation = `${locationDetails.village}, ${locationDetails.cell}, ${locationDetails.sector}, ${locationDetails.district}`;
+    const hasExactCoordinates = serviceLocationHasCoordinates(serviceLocation);
+    if (hasExactCoordinates && !isCoordinateInsideRwanda(serviceLocation.latitude, serviceLocation.longitude)) {
+      return res.status(400).json({ message: "Selected service location must be inside Rwanda." });
+    }
+    const locationDetails = {
+      province: serviceLocation.province,
+      district: serviceLocation.district,
+      sector: serviceLocation.sector,
+      cell: serviceLocation.cell,
+      village: serviceLocation.village,
+    };
+    const fullLocation = serviceLocation.fullAddress || [
+      serviceLocation.village,
+      serviceLocation.cell,
+      serviceLocation.sector,
+      serviceLocation.district,
+      serviceLocation.province,
+      "Rwanda",
+    ].filter(Boolean).join(", ");
     const payoutDetails = {
       method: String(req.body.payoutDetails?.method || "mobile-money").trim(),
       accountName: String(req.body.payoutDetails?.accountName || "").trim(),
@@ -639,7 +692,7 @@ const upsertMyService = async (req, res) => {
     if (!payoutDetails.accountName || !payoutDetails.accountNumber) {
       return res.status(400).json({ message: "Payout account name and phone/account number are required." });
     }
-    const normalizedStatus = req.body.status === "unavailable" ? "unavailable" : "available";
+    const normalizedStatus = hasExactCoordinates && req.body.status !== "unavailable" ? "available" : "unavailable";
     const availabilityTable = normalizeAvailabilityTable(req.body.availabilityTable);
     if (!availabilityTable.rows.length) {
       return res.status(400).json({ message: "Add at least one service and its RWF price." });
@@ -720,6 +773,7 @@ const upsertMyService = async (req, res) => {
             type: String(category).trim(),
             location: fullLocation,
             locationDetails,
+            serviceLocation,
             description: String(description || "").trim(),
             basePrice: 0,
             priceText: "",
@@ -730,6 +784,9 @@ const upsertMyService = async (req, res) => {
               ? {
                   "contactDetails.phone": String(req.body.contactDetails.phone || "").trim(),
                   "contactDetails.whatsapp": String(req.body.contactDetails.whatsapp || "").trim(),
+                  "contactDetails.exactAddress": serviceLocation.fullAddress,
+                  "contactDetails.latitude": serviceLocation.latitude,
+                  "contactDetails.longitude": serviceLocation.longitude,
                 }
               : {}),
             payoutDetails,
@@ -740,7 +797,7 @@ const upsertMyService = async (req, res) => {
             availabilityTable,
             bookingForm,
             inventoryStatus,
-            approvalStatus: existingBusiness.approvalStatus === "approved" ? "approved" : "pending",
+            approvalStatus: hasExactCoordinates ? (existingBusiness.approvalStatus === "approved" ? "approved" : "pending") : "draft",
           },
           ...(promotionChanged ? {
             $push: {
@@ -771,6 +828,7 @@ const upsertMyService = async (req, res) => {
       type: String(category).trim(),
       location: fullLocation,
       locationDetails,
+      serviceLocation,
       description: String(description || "").trim(),
       basePrice: 0,
       priceText: "",
@@ -780,6 +838,9 @@ const upsertMyService = async (req, res) => {
         ...(req.body.contactDetails && typeof req.body.contactDetails === "object" ? req.body.contactDetails : {}),
         email: req.body.contactDetails?.email || req.user.email,
         phone: req.body.contactDetails?.phone || req.user.phone || "",
+        exactAddress: serviceLocation.fullAddress,
+        latitude: serviceLocation.latitude,
+        longitude: serviceLocation.longitude,
       },
       payoutDetails,
       images,
@@ -791,7 +852,7 @@ const upsertMyService = async (req, res) => {
       sellerContactEmail: req.user.email,
       ownerUserId: req.user._id,
       supplierId: req.user.supplierId || null,
-      approvalStatus: "pending",
+      approvalStatus: hasExactCoordinates ? "pending" : "draft",
       status: normalizedStatus,
       availableQuantity: quantity,
       quantityRemaining: quantity,

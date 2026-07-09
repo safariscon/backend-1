@@ -201,6 +201,20 @@ const bookingSchema = new mongoose.Schema(
       default: false,
       index: true,
     },
+    depositPaid: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    locationUnlocked: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    locationUnlockedAt: {
+      type: Date,
+      default: null,
+    },
     paymentMethod: {
       type: String,
       default: "",
