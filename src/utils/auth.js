@@ -25,6 +25,7 @@ const buildUserPayload = (user) => ({
   businessId: user.hotelId || null,
   sellerId: user.sellerId || "",
   phone: user.phone || "",
+  emailVerified: Boolean(user.emailVerified),
 });
 
 module.exports = {

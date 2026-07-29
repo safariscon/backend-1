@@ -1,12 +1,98 @@
 const bcrypt = require("bcrypt");
+const crypto = require("crypto");
 const User = require("../models/User");
 const Hotel = require("../models/Hotel");
 const Room = require("../models/Room");
 const Supplier = require("../models/Supplier");
 const { generateToken, buildUserPayload } = require("../utils/auth");
 const { prefixedCode } = require("../utils/secureIds");
-const { sendProviderOnboardingEmail } = require("../utils/notify");
+const {
+  sendProviderOnboardingEmail,
+  sendEmailVerificationOtp,
+  sendPasswordResetOtp,
+} = require("../utils/notify");
 const { REALTIME_EVENTS, emitRealtime } = require("../utils/realtime");
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const OTP_LENGTH = 6;
+const OTP_EXPIRY_MINUTES = Number(process.env.AUTH_OTP_EXPIRY_MINUTES || 10);
+const OTP_RESEND_COOLDOWN_SECONDS = Number(process.env.AUTH_OTP_RESEND_COOLDOWN_SECONDS || 60);
+const OTP_MAX_ATTEMPTS = Number(process.env.AUTH_OTP_MAX_ATTEMPTS || 5);
+
+const normalizeEmail = (email) => String(email || "").toLowerCase().trim();
+const isValidEmail = (email) => EMAIL_REGEX.test(String(email || ""));
+const minutesFromNow = (minutes) => new Date(Date.now() + minutes * 60 * 1000);
+const secondsSince = (date) => date ? Math.floor((Date.now() - new Date(date).getTime()) / 1000) : Infinity;
+const createOtp = () => String(crypto.randomInt(0, 10 ** OTP_LENGTH)).padStart(OTP_LENGTH, "0");
+
+const buildGenericOtpResponse = (message) => ({
+  message,
+  expiresInMinutes: OTP_EXPIRY_MINUTES,
+});
+
+const canSendOtp = (lastSentAt) => secondsSince(lastSentAt) >= OTP_RESEND_COOLDOWN_SECONDS;
+
+const issueEmailVerificationOtp = async (user) => {
+  if (user.emailVerified) return { sent: false, alreadyVerified: true };
+  if (!canSendOtp(user.emailVerificationOtpSentAt)) return { sent: false, cooldown: true };
+
+  const otp = createOtp();
+  user.emailVerificationOtpHash = await bcrypt.hash(otp, 10);
+  user.emailVerificationOtpExpiresAt = minutesFromNow(OTP_EXPIRY_MINUTES);
+  user.emailVerificationOtpAttempts = 0;
+  user.emailVerificationOtpSentAt = new Date();
+  await user.save();
+
+  await sendEmailVerificationOtp({
+    email: user.email,
+    name: user.name,
+    otp,
+    expiresInMinutes: OTP_EXPIRY_MINUTES,
+  });
+
+  return { sent: true };
+};
+
+const issuePasswordResetOtp = async (user) => {
+  if (!canSendOtp(user.passwordResetOtpSentAt)) return { sent: false, cooldown: true };
+
+  const otp = createOtp();
+  user.passwordResetOtpHash = await bcrypt.hash(otp, 10);
+  user.passwordResetOtpExpiresAt = minutesFromNow(OTP_EXPIRY_MINUTES);
+  user.passwordResetOtpAttempts = 0;
+  user.passwordResetOtpSentAt = new Date();
+  await user.save();
+
+  await sendPasswordResetOtp({
+    email: user.email,
+    name: user.name,
+    otp,
+    expiresInMinutes: OTP_EXPIRY_MINUTES,
+  });
+
+  return { sent: true };
+};
+
+const verifyOtp = async ({ user, otp, hashField, expiresField, attemptsField }) => {
+  if (!user?.[hashField] || !user?.[expiresField]) {
+    return { ok: false, status: 400, message: "OTP has not been requested or has already been used." };
+  }
+  if (new Date(user[expiresField]).getTime() <= Date.now()) {
+    return { ok: false, status: 400, message: "OTP has expired. Request a new code." };
+  }
+  if (Number(user[attemptsField] || 0) >= OTP_MAX_ATTEMPTS) {
+    return { ok: false, status: 429, message: "Too many incorrect OTP attempts. Request a new code." };
+  }
+
+  const matches = await bcrypt.compare(String(otp || ""), user[hashField]);
+  if (!matches) {
+    user[attemptsField] = Number(user[attemptsField] || 0) + 1;
+    await user.save();
+    return { ok: false, status: 400, message: "Invalid OTP." };
+  }
+
+  return { ok: true };
+};
 
 const BUSINESS_TYPE_CONFIG = {
   hotel: {
@@ -257,7 +343,8 @@ const login = async (req, res) => {
         .json({ message: "email and password are required." });
     }
 
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    const normalizedEmail = normalizeEmail(email);
+    const user = await User.findOne({ email: normalizedEmail });
     if (!user) {
       return res.status(401).json({ message: "Invalid credentials." });
     }
@@ -274,6 +361,14 @@ const login = async (req, res) => {
     if (!isMatch) {
       return res.status(401).json({ message: "Invalid credentials." });
     }
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        code: "EMAIL_NOT_VERIFIED",
+        message: "Please verify your email before logging in.",
+        email: user.email,
+        emailVerified: false,
+      });
+    }
 
     const token = generateToken(user);
     return res.json({
@@ -288,11 +383,15 @@ const login = async (req, res) => {
 const registerTourist = async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
+    const normalizedEmail = normalizeEmail(email);
 
     if (!name || !email || !password || !role) {
       return res
         .status(400)
         .json({ message: "name, email, password and role are required." });
+    }
+    if (!isValidEmail(normalizedEmail)) {
+      return res.status(400).json({ message: "A valid email address is required." });
     }
 
     if (!["customer", "tourist"].includes(role)) {
@@ -301,7 +400,7 @@ const registerTourist = async (req, res) => {
         .json({ message: 'Only customer accounts can self-register.' });
     }
 
-    const existing = await User.findOne({ email: email.toLowerCase().trim() });
+    const existing = await User.findOne({ email: normalizedEmail });
     if (existing) {
       return res.status(409).json({ message: "User already exists." });
     }
@@ -309,15 +408,28 @@ const registerTourist = async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = await User.create({
       name: name.trim(),
-      email: email.toLowerCase().trim(),
+      email: normalizedEmail,
       password: hashedPassword,
       role: "customer",
     });
+
+    let emailVerificationSent = false;
+    try {
+      const otpResult = await issueEmailVerificationOtp(user);
+      emailVerificationSent = Boolean(otpResult.sent);
+    } catch (emailError) {
+      console.warn("Email verification OTP delivery failed:", emailError.message);
+    }
 
     const token = generateToken(user);
     return res.status(201).json({
       user: await buildAuthUserPayload(user),
       token,
+      emailVerification: {
+        required: true,
+        sent: emailVerificationSent,
+        expiresInMinutes: OTP_EXPIRY_MINUTES,
+      },
     });
   } catch (error) {
     return res
@@ -569,6 +681,11 @@ const completeProviderRegistration = async (req, res) => {
 
     user.password = await bcrypt.hash(String(newPassword), 12);
     user.mustSetPassword = false;
+    user.emailVerified = true;
+    user.emailVerifiedAt = user.emailVerifiedAt || new Date();
+    user.emailVerificationOtpHash = "";
+    user.emailVerificationOtpExpiresAt = null;
+    user.emailVerificationOtpAttempts = 0;
     await user.save();
 
     const token = generateToken(user);
@@ -585,9 +702,154 @@ const completeProviderRegistration = async (req, res) => {
   }
 };
 
+const resendVerificationOtp = async (req, res) => {
+  try {
+    const normalizedEmail = normalizeEmail(req.body.email);
+    if (!isValidEmail(normalizedEmail)) {
+      return res.status(400).json({ message: "A valid email address is required." });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) {
+      return res.json(buildGenericOtpResponse("If this email is registered, a verification code has been sent."));
+    }
+    if (user.emailVerified) {
+      return res.json({ message: "Email is already verified.", emailVerified: true });
+    }
+
+    const result = await issueEmailVerificationOtp(user);
+    if (result.cooldown) {
+      return res.status(429).json({
+        message: `Please wait ${OTP_RESEND_COOLDOWN_SECONDS} seconds before requesting another code.`,
+      });
+    }
+
+    return res.json(buildGenericOtpResponse("Verification code sent."));
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to send verification code.", error: error.message });
+  }
+};
+
+const verifyEmailOtp = async (req, res) => {
+  try {
+    const normalizedEmail = normalizeEmail(req.body.email);
+    const otp = String(req.body.otp || "").trim();
+    if (!isValidEmail(normalizedEmail) || !otp) {
+      return res.status(400).json({ message: "A valid email and OTP are required." });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) return res.status(404).json({ message: "User not found." });
+    if (user.emailVerified) {
+      return res.json({
+        message: "Email is already verified.",
+        user: await buildAuthUserPayload(user),
+        token: generateToken(user),
+      });
+    }
+
+    const verification = await verifyOtp({
+      user,
+      otp,
+      hashField: "emailVerificationOtpHash",
+      expiresField: "emailVerificationOtpExpiresAt",
+      attemptsField: "emailVerificationOtpAttempts",
+    });
+    if (!verification.ok) {
+      return res.status(verification.status).json({ message: verification.message });
+    }
+
+    user.emailVerified = true;
+    user.emailVerifiedAt = new Date();
+    user.emailVerificationOtpHash = "";
+    user.emailVerificationOtpExpiresAt = null;
+    user.emailVerificationOtpAttempts = 0;
+    await user.save();
+
+    return res.json({
+      message: "Email verified successfully.",
+      user: await buildAuthUserPayload(user),
+      token: generateToken(user),
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to verify email.", error: error.message });
+  }
+};
+
+const forgotPassword = async (req, res) => {
+  try {
+    const normalizedEmail = normalizeEmail(req.body.email);
+    if (!isValidEmail(normalizedEmail)) {
+      return res.status(400).json({ message: "A valid email address is required." });
+    }
+
+    const generic = buildGenericOtpResponse("If this email is registered, a password reset code has been sent.");
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user || !user.password || user.mustSetPassword) return res.json(generic);
+
+    const result = await issuePasswordResetOtp(user);
+    if (result.cooldown) {
+      return res.status(429).json({
+        message: `Please wait ${OTP_RESEND_COOLDOWN_SECONDS} seconds before requesting another code.`,
+      });
+    }
+
+    return res.json(generic);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to start password reset.", error: error.message });
+  }
+};
+
+const resetPassword = async (req, res) => {
+  try {
+    const normalizedEmail = normalizeEmail(req.body.email);
+    const otp = String(req.body.otp || "").trim();
+    const newPassword = String(req.body.newPassword || "");
+
+    if (!isValidEmail(normalizedEmail) || !otp || !newPassword) {
+      return res.status(400).json({ message: "A valid email, OTP, and new password are required." });
+    }
+    if (newPassword.length < 8) {
+      return res.status(400).json({ message: "New password must be at least 8 characters long." });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) return res.status(404).json({ message: "User not found." });
+
+    const verification = await verifyOtp({
+      user,
+      otp,
+      hashField: "passwordResetOtpHash",
+      expiresField: "passwordResetOtpExpiresAt",
+      attemptsField: "passwordResetOtpAttempts",
+    });
+    if (!verification.ok) {
+      return res.status(verification.status).json({ message: verification.message });
+    }
+
+    user.password = await bcrypt.hash(newPassword, 12);
+    user.passwordResetOtpHash = "";
+    user.passwordResetOtpExpiresAt = null;
+    user.passwordResetOtpAttempts = 0;
+    user.passwordChangedAt = new Date();
+    user.mustSetPassword = false;
+    await user.save();
+
+    return res.json({
+      message: "Password reset successfully. You can now login with the new password.",
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to reset password.", error: error.message });
+  }
+};
+
 module.exports = {
   login,
   registerTourist,
   registerBusinessByAdmin,
   completeProviderRegistration,
+  resendVerificationOtp,
+  verifyEmailOtp,
+  forgotPassword,
+  resetPassword,
 };

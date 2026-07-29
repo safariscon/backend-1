@@ -49,6 +49,51 @@ const userSchema = new mongoose.Schema(
       default: false,
       index: true,
     },
+    emailVerified: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    emailVerifiedAt: {
+      type: Date,
+      default: null,
+    },
+    emailVerificationOtpHash: {
+      type: String,
+      default: "",
+    },
+    emailVerificationOtpExpiresAt: {
+      type: Date,
+      default: null,
+    },
+    emailVerificationOtpAttempts: {
+      type: Number,
+      default: 0,
+    },
+    emailVerificationOtpSentAt: {
+      type: Date,
+      default: null,
+    },
+    passwordResetOtpHash: {
+      type: String,
+      default: "",
+    },
+    passwordResetOtpExpiresAt: {
+      type: Date,
+      default: null,
+    },
+    passwordResetOtpAttempts: {
+      type: Number,
+      default: 0,
+    },
+    passwordResetOtpSentAt: {
+      type: Date,
+      default: null,
+    },
+    passwordChangedAt: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true }
 );
