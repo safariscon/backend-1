@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
+    "seed-admin": "node src/utils/seedAdmin.js",
     "migrate:images": "node src/utils/migrateImagesToCloudinary.js",
     "verify:images": "node src/utils/verifyImageStorage.js",
     "test": "node --test test"
