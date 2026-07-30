@@ -92,29 +92,16 @@ const calculateDuration = ({ startDate, endDate, startTime, endTime, unit }) => 
   return Math.ceil(milliseconds / 86400000);
 };
 
-const calculateQuote = ({ option, people, quantity, duration }) => {
+const calculateQuote = ({ option, people, quantity }) => {
   const base = option.price;
   const units = Math.max(1, Number(quantity));
   const guests = Math.max(1, Number(people));
-  const period = Math.max(1, Number(duration));
-  const totals = {
-    fixed: base,
-    "per-person": base * guests,
-    "per-room": base * units,
-    "per-night": base * units * period,
-    "per-day": base * units * period,
-    "per-hour": base * units * period,
-    "per-item": base * units,
-    "per-ticket": base * units,
-    "per-package": base,
-    "per-session": base * units,
-  };
-  const total = Math.round(totals[option.priceType] || 0);
+  const totalConsumptionUnits = Math.max(1, Math.floor(guests * units));
+  const total = Math.round(base * totalConsumptionUnits);
   const deposit = Math.round(total * 0.3);
   const remaining = total - deposit;
-  const priceTypeLabel = option.priceType.replace(/-/g, " ");
-  const reason = `You will pay RWF ${deposit.toLocaleString("en-US")} now because you selected ${option.name} at RWF ${base.toLocaleString("en-US")} (${priceTypeLabel}) for ${units} unit(s) and ${period} ${option.durationUnit}. The full price is RWF ${total.toLocaleString("en-US")}, and the required deposit is 30%. Provider details will unlock after successful payment.`;
-  return { total, deposit, remaining, reason };
+  const reason = `You will pay RWF ${deposit.toLocaleString("en-US")} now because you selected ${option.name} at RWF ${base.toLocaleString("en-US")} for ${guests} people and ${units} quantity/unit(s). The total consumption units are ${totalConsumptionUnits}. The full price is RWF ${total.toLocaleString("en-US")}, and the required deposit is 30%. Provider details will unlock after successful payment.`;
+  return { total, deposit, remaining, reason, totalConsumptionUnits };
 };
 
 const getActivePromotion = (promotion, now = new Date()) => {

@@ -13,6 +13,21 @@ const response = () => ({
   json(body) { this.body = body; return this; },
 });
 
+const customerLocationDetails = {
+  province: "Western Province",
+  district: "Rubavu",
+  sector: "Gisenyi",
+  cell: "Amahoro",
+  village: "Umucyo",
+};
+
+const bookingSchedule = {
+  bookingDate: "2026-07-10",
+  endBookingDate: "2026-07-10",
+  startTime: "18:00",
+  endTime: "20:00",
+};
+
 test("booking checks seller/admin status without quantity-driven availability", async (context) => {
   const originalFindOne = Hotel.findOne;
   let receivedQuery = null;
@@ -98,6 +113,9 @@ test("booking stores the promotion that was active when the customer booked", as
       destinationPlace: "Happy Hour booking",
       destinationLocation: "Rubavu",
       quantity: 3,
+      customerLocationDetails,
+      ...bookingSchedule,
+      bookingDetails: { customerLocationDetails, ...bookingSchedule },
     },
   }, result);
 

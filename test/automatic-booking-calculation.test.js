@@ -23,6 +23,21 @@ const response = () => ({
   json(body) { this.body = body; return this; },
 });
 
+const customerLocationDetails = {
+  province: "Kigali City",
+  district: "Gasabo",
+  sector: "Kimironko",
+  cell: "Bibare",
+  village: "Umucyo",
+};
+
+const bookingSchedule = {
+  bookingDate: "2026-07-10",
+  endBookingDate: "2026-07-12",
+  startTime: "09:00",
+  endTime: "17:00",
+};
+
 test("automatic per-night quote calculates total, 30% deposit, and snapshot values", () => {
   const option = normalizePriceOption({
     id: "room_all_needs",
@@ -35,26 +50,28 @@ test("automatic per-night quote calculates total, 30% deposit, and snapshot valu
       maximumDuration: 14,
       availability: 4,
       details: "Wi-Fi, breakfast and private bathroom",
-    },
-  });
+  },
+});
   const duration = calculateDuration({ startDate: "2026-07-02", endDate: "2026-07-04", unit: "nights" });
-  const quote = calculateQuote({ option, people: 2, quantity: 1, duration });
+  const quote = calculateQuote({ option, people: 2, quantity: 2, duration });
 
   assert.equal(duration, 2);
-  assert.equal(quote.total, 199994);
-  assert.equal(quote.deposit, 59998);
-  assert.equal(quote.remaining, 139996);
-  assert.match(quote.reason, /RWF 59,998/);
+  assert.equal(quote.totalConsumptionUnits, 4);
+  assert.equal(quote.total, 399988);
+  assert.equal(quote.deposit, 119996);
+  assert.equal(quote.remaining, 279992);
+  assert.match(quote.reason, /total consumption units are 4/i);
 });
 
-test("automatic per-person quote uses people rather than units", () => {
+test("automatic quote multiplies people by quantity for consumption units", () => {
   const option = normalizePriceOption({
     id: "tour",
     cells: { service: "City tour", price: 10000, priceType: "per-person", calculationField: "people", durationUnit: "same-day", availability: 10 },
   });
-  const quote = calculateQuote({ option, people: 3, quantity: 1, duration: 1 });
-  assert.equal(quote.total, 30000);
-  assert.equal(quote.deposit, 9000);
+  const quote = calculateQuote({ option, people: 3, quantity: 2, duration: 1 });
+  assert.equal(quote.totalConsumptionUnits, 6);
+  assert.equal(quote.total, 60000);
+  assert.equal(quote.deposit, 18000);
 });
 
 test("active promotion applies discount and calculates deposit from final price", () => {
@@ -160,17 +177,20 @@ test("customer can create an automatic booking and receives a backend quote", as
       destinationPlace: "Hotel room",
       destinationLocation: "Kigali",
       guests: 2,
-      quantity: 1,
+      numberOfPeople: 2,
+      quantity: 2,
+      customerLocationDetails,
+      ...bookingSchedule,
       bookingDetails: {
+        customerLocationDetails,
+        ...bookingSchedule,
         selectedOptionId: "room_option",
         requestedService: "Room with all needs",
         fullName: "Test Customer",
         phone: "+250788000000",
         email: "customer@example.com",
-        bookingDate: "2026-07-10",
-        endDate: "2026-07-12",
         numberOfPeople: 2,
-        quantity: 1,
+        quantity: 2,
       },
     },
   }, result);
@@ -178,8 +198,64 @@ test("customer can create an automatic booking and receives a backend quote", as
   assert.equal(result.statusCode, 201);
   assert.equal(result.body.booking.bookingMode, "automatic");
   assert.equal(result.body.booking.status, "waiting-for-payment");
-  assert.equal(result.body.quote.total, 199994);
-  assert.equal(result.body.quote.deposit, 59998);
+  assert.equal(result.body.quote.totalConsumptionUnits, 4);
+  assert.equal(result.body.booking.numberOfPeople, 2);
+  assert.equal(result.body.booking.quantity, 2);
+  assert.equal(result.body.booking.totalConsumptionUnits, 4);
+  assert.equal(result.body.quote.total, 399988);
+  assert.equal(result.body.quote.deposit, 119996);
+});
+
+test("booking creation rejects an end booking date before the booking date", async (context) => {
+  const originals = {
+    readyState: SiteSetting.db._readyState,
+    settingFindOne: SiteSetting.findOne,
+    hotelFindOne: Hotel.findOne,
+    hotelCountDocuments: Hotel.countDocuments,
+  };
+  const business = {
+    _id: "507f1f77bcf86cd799439022",
+    type: "hotel-rooms",
+    approvalStatus: "approved",
+    status: "available",
+    bookingMode: "manual",
+  };
+
+  SiteSetting.db._readyState = 1;
+  SiteSetting.findOne = () => ({ lean: async () => ({ value: { bookingMode: "service-level" } }) });
+  Hotel.findOne = async () => business;
+  Hotel.countDocuments = async () => 1;
+  context.after(() => {
+    SiteSetting.db._readyState = originals.readyState;
+    SiteSetting.findOne = originals.settingFindOne;
+    Hotel.findOne = originals.hotelFindOne;
+    Hotel.countDocuments = originals.hotelCountDocuments;
+  });
+
+  const result = response();
+  await createBookingRequest({
+    user: { _id: "507f1f77bcf86cd799439011", role: "customer" },
+    body: {
+      hotelId: business._id,
+      destinationPlace: "Hotel room",
+      destinationLocation: "Kigali",
+      customerLocationDetails,
+      bookingDate: "2026-07-12",
+      endBookingDate: "2026-07-10",
+      startTime: "09:00",
+      endTime: "17:00",
+      bookingDetails: {
+        customerLocationDetails,
+        bookingDate: "2026-07-12",
+        endBookingDate: "2026-07-10",
+        startTime: "09:00",
+        endTime: "17:00",
+      },
+    },
+  }, result);
+
+  assert.equal(result.statusCode, 400);
+  assert.match(result.body.message, /End booking date cannot be before booking date/i);
 });
 
 test("automatic booking saves active promotion price snapshot", async (context) => {
@@ -209,7 +285,7 @@ test("automatic booking saves active promotion price snapshot", async (context) 
     availabilityTable: {
       rows: [{
         id: "tour_option",
-        cells: { service: "City tour", price: 100000, priceType: "fixed", calculationField: "fixed", durationUnit: "none", availability: 5, details: "Tour" },
+        cells: { service: "City tour", price: 100000, priceType: "fixed", calculationField: "fixed", durationUnit: "none", availability: 10, details: "Tour" },
       }],
     },
   };
@@ -242,34 +318,42 @@ test("automatic booking saves active promotion price snapshot", async (context) 
       hotelId: business._id,
       destinationPlace: "City tour",
       destinationLocation: "Kigali",
-      guests: 1,
-      quantity: 1,
+      guests: 2,
+      numberOfPeople: 2,
+      quantity: 3,
+      customerLocationDetails,
+      ...bookingSchedule,
       bookingDetails: {
+        customerLocationDetails,
+        ...bookingSchedule,
         selectedOptionId: "tour_option",
         requestedService: "City tour",
         fullName: "Test Customer",
         phone: "+250788000000",
         email: "customer@example.com",
-        bookingDate: "2026-07-10",
-        numberOfPeople: 1,
-        quantity: 1,
+        numberOfPeople: 2,
+        quantity: 3,
       },
     },
   }, result);
 
   assert.equal(result.statusCode, 201);
-  assert.equal(result.body.quote.originalPrice, 100000);
-  assert.equal(result.body.quote.discountAmount, 25000);
-  assert.equal(result.body.quote.total, 75000);
-  assert.equal(result.body.quote.deposit, 22500);
-  assert.equal(createdBooking.priceSnapshot.originalPrice, 100000);
+  assert.equal(result.body.quote.totalConsumptionUnits, 6);
+  assert.equal(result.body.quote.originalPrice, 600000);
+  assert.equal(result.body.quote.discountAmount, 150000);
+  assert.equal(result.body.quote.total, 450000);
+  assert.equal(result.body.quote.deposit, 135000);
+  assert.equal(createdBooking.numberOfPeople, 2);
+  assert.equal(createdBooking.quantity, 3);
+  assert.equal(createdBooking.totalConsumptionUnits, 6);
+  assert.equal(createdBooking.priceSnapshot.originalPrice, 600000);
   assert.equal(createdBooking.priceSnapshot.promotionApplied, true);
   assert.equal(createdBooking.priceSnapshot.promotionTitle, "Summer Deal");
   assert.equal(createdBooking.priceSnapshot.promotionPercent, 25);
-  assert.equal(createdBooking.priceSnapshot.discountAmount, 25000);
-  assert.equal(createdBooking.priceSnapshot.finalPrice, 75000);
+  assert.equal(createdBooking.priceSnapshot.discountAmount, 150000);
+  assert.equal(createdBooking.priceSnapshot.finalPrice, 450000);
   assert.equal(createdBooking.priceSnapshot.depositPercent, 30);
-  assert.equal(createdBooking.priceSnapshot.depositAmount, 22500);
+  assert.equal(createdBooking.priceSnapshot.depositAmount, 135000);
 });
 
 test("seller service save rejects invalid promotion percent", async () => {

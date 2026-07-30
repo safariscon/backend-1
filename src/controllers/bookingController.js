@@ -10,12 +10,12 @@ const { createGuestName } = require("../utils/anonymousBusiness");
 const { storeBookingPdf, getBookingPdfDownloadUrl } = require("../services/bookingPdfStorage");
 const { buildEventData, recordAnalyticsEvent } = require("./analyticsController");
 const { claimRebookId, finalizeRebookIdUse, releaseRebookIdClaim } = require("./rebookController");
+const { sendServiceProviderBookingRequestEmail } = require("../utils/notify");
 const {
   cleanText,
   normalizePriceOption,
   isAutomaticReady,
   resolveBookingMode,
-  calculateDuration,
   calculateQuote,
   applyPromotionToQuote,
   getActivePromotion,
@@ -25,6 +25,7 @@ const publicFrontendUrl = () =>
   String(process.env.PUBLIC_FRONTEND_URL || process.env.FRONTEND_URL || "https://safariscon.vercel.app").replace(/\/+$/, "");
 
 const buildVerifyUrl = (token) => `${publicFrontendUrl()}/verify/${encodeURIComponent(token)}`;
+const buildPaymentUrl = (bookingId) => `${publicFrontendUrl()}/bookings/${encodeURIComponent(bookingId)}/pay`;
 
 const buildQrImageUrl = (token) =>
   `https://api.qrserver.com/v1/create-qr-code/?size=260x260&margin=12&data=${encodeURIComponent(
@@ -75,6 +76,8 @@ const sanitizeBusinessLocationForCustomer = (business, booking, customerId) => {
   if (!business) return business;
   const exactUnlocked = locationIsUnlockedForCustomer(booking, customerId);
   const sanitized = { ...business };
+  delete sanitized.commissionPercentage;
+  delete sanitized.payoutDetails;
   sanitized.publicLocation = getPublicLocation(business);
   sanitized.serviceLocation = exactUnlocked ? getUnlockedServiceLocation(business) : sanitized.publicLocation;
   sanitized.locationDetails = exactUnlocked
@@ -112,6 +115,24 @@ const getPaidDepositAmount = (booking) => {
 
 const calculateRefundAmount = (booking, refundPercentOfDeposit) =>
   Math.round((getPaidDepositAmount(booking) * Math.max(0, Number(refundPercentOfDeposit || 0))) / 100);
+
+const normalizeCustomerLocationDetails = (value = {}) => ({
+  province: cleanText(value.province, 120),
+  district: cleanText(value.district, 120),
+  sector: cleanText(value.sector, 120),
+  cell: cleanText(value.cell, 120),
+  village: cleanText(value.village, 120),
+});
+
+const formatCustomerLocation = (details) =>
+  [
+    details.village,
+    details.cell,
+    details.sector,
+    details.district,
+    details.province,
+    "Rwanda",
+  ].filter(Boolean).join(", ");
 
 const resolveBookingActionDeadline = (booking) => {
   const details = booking?.bookingDetails || {};
@@ -179,22 +200,39 @@ const createBookingRequest = async (req, res) => {
       hotelId,
       checkIn,
       checkOut,
+      bookingDate,
+      endBookingDate,
+      startTime,
+      endTime,
       guests,
+      numberOfPeople,
       quantity,
       totalPrice,
       destinationPlace,
       destinationLocation,
+      customerLocation,
+      customerLocationDetails,
       bookingDetails,
       rebookId,
     } = req.body;
 
     const rawDetails = bookingDetails && typeof bookingDetails === "object" ? bookingDetails : {};
+    const normalizedCustomerLocationDetails = normalizeCustomerLocationDetails(
+      customerLocationDetails && typeof customerLocationDetails === "object"
+        ? customerLocationDetails
+        : rawDetails.customerLocationDetails
+    );
+    const normalizedCustomerLocation = cleanText(
+      customerLocation || rawDetails.customerLocation || formatCustomerLocation(normalizedCustomerLocationDetails),
+      500
+    );
     const details = {
       ...rawDetails,
       fullName: cleanText(rawDetails.fullName, 120),
       phone: cleanText(rawDetails.phone, 40),
       email: cleanText(rawDetails.email, 160).toLowerCase(),
-      customerLocation: cleanText(rawDetails.customerLocation, 300),
+      customerLocation: normalizedCustomerLocation,
+      customerLocationDetails: normalizedCustomerLocationDetails,
       specialRequests: cleanText(rawDetails.specialRequests, 1000),
       customResponses: Array.isArray(rawDetails.customResponses)
         ? rawDetails.customResponses.slice(0, 80).map((item) => ({
@@ -218,7 +256,12 @@ const createBookingRequest = async (req, res) => {
       });
     }
 
-    const bookingQuantity = Math.max(1, Number(quantity || guests || 1));
+    const bookingPeople = Math.max(1, Math.floor(Number(numberOfPeople || rawDetails.numberOfPeople || guests || 1)));
+    const bookingQuantity = Math.max(1, Math.floor(Number(quantity || rawDetails.quantity || 1)));
+    const totalConsumptionUnits = bookingPeople * bookingQuantity;
+    details.numberOfPeople = bookingPeople;
+    details.quantity = bookingQuantity;
+    details.totalConsumptionUnits = totalConsumptionUnits;
     let preferredHotelId = null;
     let selectedBusiness = null;
     let anonymousBusinessName = "";
@@ -256,6 +299,39 @@ const createBookingRequest = async (req, res) => {
       });
       anonymousBusinessName = createGuestName(hotel.type, categoryPosition || 1);
     }
+    const hasCompleteCustomerLocation = [
+      "province",
+      "district",
+      "sector",
+      "cell",
+      "village",
+    ].every((field) => normalizedCustomerLocationDetails[field]);
+    if (!hasCompleteCustomerLocation) {
+      return res.status(400).json({
+        message: "Customer province, district, sector, cell, and village are required.",
+      });
+    }
+    const normalizedBookingDateValue = bookingDate || rawDetails.bookingDate || checkIn;
+    const normalizedEndBookingDateValue = endBookingDate || rawDetails.endBookingDate || checkOut;
+    const normalizedStartTime = cleanText(startTime || rawDetails.startTime, 20);
+    const normalizedEndTime = cleanText(endTime || rawDetails.endTime, 20);
+    if (!normalizedBookingDateValue || !normalizedEndBookingDateValue || !normalizedStartTime || !normalizedEndTime) {
+      return res.status(400).json({
+        message: "Booking date, end booking date, start time, and end time are required.",
+      });
+    }
+    const normalizedBookingDate = new Date(normalizedBookingDateValue);
+    const normalizedEndBookingDate = new Date(normalizedEndBookingDateValue);
+    if (Number.isNaN(normalizedBookingDate.getTime()) || Number.isNaN(normalizedEndBookingDate.getTime())) {
+      return res.status(400).json({ message: "Booking date and end booking date must be valid dates." });
+    }
+    if (normalizedEndBookingDate < normalizedBookingDate) {
+      return res.status(400).json({ message: "End booking date cannot be before booking date." });
+    }
+    details.bookingDate = normalizedBookingDateValue;
+    details.endBookingDate = normalizedEndBookingDateValue;
+    details.startTime = normalizedStartTime;
+    details.endTime = normalizedEndTime;
     const setting = SiteSetting.db.readyState === 1
       ? await SiteSetting.findOne({ key: "marketplace-settings" }).lean()
       : null;
@@ -281,20 +357,9 @@ const createBookingRequest = async (req, res) => {
       if (!details.fullName || !/^\+?[0-9][0-9\s-]{7,18}$/.test(details.phone) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(details.email)) {
         return res.status(400).json({ message: "Full name, a valid phone number, and a valid email are required." });
       }
-      if (!rawDetails.bookingDate) return res.status(400).json({ message: "Booking date is required." });
-      const people = Math.max(1, Math.floor(Number(rawDetails.numberOfPeople || guests || 0)));
-      const units = Math.max(1, Math.floor(Number(rawDetails.quantity || quantity || 0)));
-      const duration = calculateDuration({
-        startDate: rawDetails.bookingDate,
-        endDate: rawDetails.endDate || rawDetails.bookingDate,
-        startTime: rawDetails.startTime,
-        endTime: rawDetails.endTime,
-        unit: selectedOption.durationUnit,
-      });
-      if (selectedOption.maximumDuration > 0 && duration > selectedOption.maximumDuration) {
-        return res.status(400).json({ message: `Booking duration cannot exceed ${selectedOption.maximumDuration} ${selectedOption.durationUnit}.` });
-      }
-      const capacityNeeded = selectedOption.priceType === "per-person" ? people : units;
+      const people = bookingPeople;
+      const units = bookingQuantity;
+      const capacityNeeded = totalConsumptionUnits;
       if (capacityNeeded > selectedOption.availability) {
         return res.status(409).json({ message: "This service is not available for the selected date, time, or quantity. Please choose another option." });
       }
@@ -316,12 +381,12 @@ const createBookingRequest = async (req, res) => {
       reservedQuantity = capacityNeeded;
       automaticQuote = {
         ...applyPromotionToQuote({
-          quote: calculateQuote({ option: selectedOption, people, quantity: units, duration }),
+          quote: calculateQuote({ option: selectedOption, people, quantity: units }),
           promotion: selectedBusiness.promotion,
         }),
         people,
         quantity: units,
-        duration,
+        totalConsumptionUnits,
       };
       bookingStatus = "waiting-for-payment";
       paymentStatus = "pending";
@@ -352,15 +417,22 @@ const createBookingRequest = async (req, res) => {
       destinationLocation: resolvedDestinationLocation,
       preferredHotelId,
       hotelId: effectiveMode === "automatic" ? preferredHotelId : null,
-      checkIn: checkIn || null,
-      checkOut: checkOut || null,
+      checkIn: checkIn || normalizedBookingDate,
+      checkOut: checkOut || normalizedEndBookingDate,
+      bookingDate: normalizedBookingDate,
+      endBookingDate: normalizedEndBookingDate,
+      startTime: normalizedStartTime,
+      endTime: normalizedEndTime,
       guests: Number(guests) || bookingQuantity,
+      numberOfPeople: bookingPeople,
       quantity: bookingQuantity,
+      totalConsumptionUnits,
       totalPrice: automaticQuote?.total || 0,
       depositPercentage: DEPOSIT_PERCENT,
       depositPercent: DEPOSIT_PERCENT,
       depositAmount: rebookOriginalBooking ? getPaidDepositAmount(rebookOriginalBooking) : automaticQuote?.deposit || 0,
       remainingBalance: rebookOriginalBooking ? Math.max(0, Number(automaticQuote?.total || 0) - getPaidDepositAmount(rebookOriginalBooking)) : automaticQuote?.remaining || 0,
+      remainingAmount: rebookOriginalBooking ? Math.max(0, Number(automaticQuote?.total || 0) - getPaidDepositAmount(rebookOriginalBooking)) : automaticQuote?.remaining || 0,
       bookingCode,
       anonymousBusinessName,
       verificationCode,
@@ -377,14 +449,24 @@ const createBookingRequest = async (req, res) => {
       refundPercentOfDeposit: 0,
       status: rebookOriginalBooking ? "provider-details-unlocked" : bookingStatus,
       bookingDetails: details,
+      customerLocation: normalizedCustomerLocation,
+      customerLocationDetails: normalizedCustomerLocationDetails,
       bookingMode: effectiveMode,
+      sellerApproval: automaticQuote ? {
+        status: "not_required",
+        requestedAt: null,
+      } : {
+        status: selectedBusiness ? "pending" : "not_required",
+        requestedAt: selectedBusiness ? new Date() : null,
+      },
       serviceOptionId: selectedOption?.id || "",
       priceSnapshot: selectedOption ? {
         ...selectedOption,
         availabilityAtBooking: selectedOption.availability,
-        bookingDuration: automaticQuote.duration,
+        bookingDuration: 1,
         numberOfPeople: automaticQuote.people,
         quantity: automaticQuote.quantity,
+        totalConsumptionUnits: automaticQuote.totalConsumptionUnits,
         totalPrice: automaticQuote.total,
         originalPrice: automaticQuote.originalPrice,
         promotionApplied: automaticQuote.promotionApplied,
@@ -409,7 +491,9 @@ const createBookingRequest = async (req, res) => {
       rebookRequestId: rebookClaim?.requestId || null,
       adminResponseMessage: automaticQuote
         ? "Your automatic quote is ready. Pay the 30% deposit to confirm and unlock provider details."
-        : "Your request has been submitted successfully. Please wait for admin response.",
+        : selectedBusiness
+          ? "Your request has been submitted successfully. Please wait for service provider approval."
+          : "Your request has been submitted successfully. Please wait for admin response.",
     });
     createdBooking = booking;
 
@@ -464,6 +548,19 @@ const createBookingRequest = async (req, res) => {
         status: booking.status,
       });
     }
+    if (!automaticQuote && selectedBusiness?.ownerUserId) {
+      try {
+        const owner = await selectedBusiness.populate("ownerUserId", "name email");
+        await sendServiceProviderBookingRequestEmail({
+          serviceProviderEmail: owner.ownerUserId?.email || selectedBusiness.sellerContactEmail || selectedBusiness.ownerEmail,
+          serviceProviderName: owner.ownerUserId?.name || selectedBusiness.name,
+          businessName: selectedBusiness.name,
+          bookingId: booking._id,
+        });
+      } catch (emailError) {
+        console.warn("Manual booking service provider email failed:", emailError.message);
+      }
+    }
     emitRealtime(REALTIME_EVENTS.BOOKING_CHANGED, {
       action: "created",
       bookingId: booking._id,
@@ -472,7 +569,7 @@ const createBookingRequest = async (req, res) => {
     });
 
     return res.status(201).json({
-      message: automaticQuote ? "Automatic quote created. Your availability is reserved for 15 minutes." : "Booking request created.",
+      message: automaticQuote ? "Automatic quote created. Your availability is reserved for 15 minutes." : "Booking request created. The service provider will review it.",
       booking,
       quote: automaticQuote,
     });
@@ -521,6 +618,20 @@ const payBooking = async (req, res) => {
     if (!booking) return res.status(404).json({ message: "Booking not found." });
     if (!["confirmed", "waiting-for-payment"].includes(booking.status)) {
       return res.status(400).json({ message: "This booking is not ready for payment." });
+    }
+    if (
+      booking.status === "confirmed" &&
+      booking.paymentDeadlineAt &&
+      new Date(booking.paymentDeadlineAt) <= new Date()
+    ) {
+      booking.status = "cancelled";
+      booking.paymentStatus = "failed";
+      booking.sellerApproval = {
+        ...(booking.sellerApproval || {}),
+        status: "expired",
+      };
+      await booking.save();
+      return res.status(409).json({ message: "The payment deadline for this approved booking has expired." });
     }
     if (
       booking.bookingMode === "automatic" &&
@@ -606,6 +717,7 @@ const payBooking = async (req, res) => {
           depositPercentage,
           depositAmount: amount,
           remainingBalance: Math.max(0, exactTotal - amount),
+          remainingAmount: Math.max(0, exactTotal - amount),
           detailsUnlocked: true,
           depositPaid: true,
           locationUnlocked: true,
@@ -647,6 +759,7 @@ const payBooking = async (req, res) => {
       senderAccount,
       receiverAccount: business?.payoutDetails?.accountNumber || business?.sellerContactEmail || business?.ownerEmail || "SafarisCon Platform",
       paymentReference,
+      commissionStatus: "collected",
       status: "paid",
     });
 

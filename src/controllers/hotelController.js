@@ -16,8 +16,30 @@ const {
   normalizeServiceSchedule,
 } = require("../services/marketplaceService");
 const { clearCache } = require("../utils/cache");
+const { sendManualBookingApprovedEmail } = require("../utils/notify");
 
 const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
+const DEPOSIT_PERCENT = 30;
+
+const publicFrontendUrl = () =>
+  String(process.env.PUBLIC_FRONTEND_URL || process.env.FRONTEND_URL || "https://safariscon.vercel.app").replace(/\/+$/, "");
+
+const buildPaymentUrl = (bookingId) => `${publicFrontendUrl()}/bookings/${encodeURIComponent(bookingId)}/pay`;
+
+const withCommissionTerms = (business) => {
+  if (!business) return business;
+  const data = typeof business.toObject === "function" ? business.toObject() : { ...business };
+  const percentage = Number(data.commissionPercentage ?? 5);
+  return {
+    ...data,
+    commissionPercentage: percentage,
+    commissionTerms: {
+      percentage,
+      label: `${percentage}% platform commission`,
+      description: "SafarisCon takes this commission from paid bookings for this business.",
+    },
+  };
+};
 
 const ensureHotelUser = (req, res) => {
   if (!["hotel", "supplier"].includes(req.user?.role)) {
@@ -103,6 +125,22 @@ const sanitizeSellerBooking = (booking) => {
   delete data.verificationCode;
   delete data.verificationToken;
   delete data.qrPayload;
+  delete data.commissionPercentage;
+  delete data.commissionAmount;
+  delete data.customerLocation;
+  delete data.customerLocationDetails;
+  if (data.touristId) {
+    data.touristId = {
+      _id: data.touristId._id || data.touristId,
+      name: data.touristId.name || data.bookingDetails?.fullName || "Customer",
+    };
+  }
+  if (data.bookingDetails && typeof data.bookingDetails === "object") {
+    delete data.bookingDetails.phone;
+    delete data.bookingDetails.email;
+    delete data.bookingDetails.customerLocation;
+    delete data.bookingDetails.customerLocationDetails;
+  }
   return data;
 };
 
@@ -225,9 +263,9 @@ const getMyHotelOverview = async (req, res) => {
       ]);
 
     return res.json({
-      hotel: primaryBusiness,
-      business: primaryBusiness,
-      businesses,
+      hotel: withCommissionTerms(primaryBusiness),
+      business: withCommissionTerms(primaryBusiness),
+      businesses: businesses.map(withCommissionTerms),
       stats: {
         totalRooms,
         availableRooms,
@@ -446,8 +484,11 @@ const listMyServices = async (req, res) => {
       category: 1,
       name: 1,
     });
+    const commissionByBusiness = new Map(
+      businesses.map((business) => [String(business._id), Number(business.commissionPercentage ?? 5)])
+    );
     const businessListings = businesses.map((business) => ({
-      ...business,
+      ...withCommissionTerms(business),
       title: business.name,
       name: business.name,
       category: business.type,
@@ -458,7 +499,20 @@ const listMyServices = async (req, res) => {
       availableQuantity: business.quantityRemaining ?? business.availableQuantity ?? 0,
       availabilityText: `${business.quantityRemaining ?? business.availableQuantity ?? 0} remaining`,
     }));
-    return res.json({ services: businessListings.concat(services) });
+    const serviceListings = services.map((service) => {
+      const data = typeof service.toObject === "function" ? service.toObject() : { ...service };
+      const percentage = commissionByBusiness.get(String(data.hotelId)) ?? 5;
+      return {
+        ...data,
+        commissionPercentage: percentage,
+        commissionTerms: {
+          percentage,
+          label: `${percentage}% platform commission`,
+          description: "SafarisCon takes this commission from paid bookings for this service.",
+        },
+      };
+    });
+    return res.json({ services: businessListings.concat(serviceListings) });
   } catch (error) {
     return res.status(500).json({
       message: "Failed to fetch hotel services.",
@@ -483,12 +537,87 @@ const updateBookingStatus = async (req, res) => {
 
     const businesses = await Hotel.find(sellerBusinessFilter(req)).select("_id");
     const businessIds = businesses.map((business) => business._id);
-    const booking = await Booking.findOne({ _id: bookingId, hotelId: { $in: businessIds } });
+    const booking = await Booking.findOne({
+      _id: bookingId,
+      $or: [{ hotelId: { $in: businessIds } }, { preferredHotelId: { $in: businessIds } }],
+    }).populate("touristId", "name email");
     if (!booking) {
       return res.status(404).json({ message: "Booking not found." });
     }
 
-    booking.status = status;
+    if (["deposit_paid", "deposit-paid", "paid", "completed"].includes(booking.paymentStatus)) {
+      return res.status(409).json({ message: "Paid bookings cannot be approved or cancelled from this action." });
+    }
+
+    if (status === "confirmed") {
+      const businessId = booking.hotelId || booking.preferredHotelId;
+      const business = businessIds.some((id) => String(id) === String(businessId))
+        ? await Hotel.findById(businessId)
+        : null;
+      if (!business) return res.status(404).json({ message: "Service not found for this booking." });
+
+      const quotedTotal = Number(req.body.totalPrice ?? req.body.quotedTotal);
+      const deadlineHours = Math.max(1, Math.min(2160, Number(req.body.paymentDeadlineHours || 24)));
+      const paymentReason = String(req.body.paymentReason || `Payment for ${business.name}`).trim().slice(0, 500);
+      if (!Number.isFinite(quotedTotal) || quotedTotal <= 0) {
+        return res.status(400).json({ message: "Set the final service price in RWF before approving this booking." });
+      }
+
+      const total = Math.round(quotedTotal);
+      const depositAmount = Math.round((total * DEPOSIT_PERCENT) / 100);
+      const commissionPercentage = Math.max(0, Math.min(100, Number(business.commissionPercentage ?? 5)));
+      const deadlineAt = new Date(Date.now() + deadlineHours * 3600000);
+
+      booking.hotelId = business._id;
+      booking.preferredHotelId = booking.preferredHotelId || business._id;
+      booking.supplierId = business.supplierId || null;
+      booking.status = "confirmed";
+      booking.totalPrice = total;
+      booking.depositPercentage = DEPOSIT_PERCENT;
+      booking.depositPercent = DEPOSIT_PERCENT;
+      booking.depositAmount = depositAmount;
+      booking.remainingBalance = Math.max(0, total - depositAmount);
+      booking.commissionPercentage = commissionPercentage;
+      booking.commissionAmount = Math.round((total * commissionPercentage) / 100);
+      booking.paymentDeadlineAt = deadlineAt;
+      booking.paymentReason = paymentReason;
+      booking.isConnected = true;
+      booking.sellerApproval = {
+        ...(booking.sellerApproval || {}),
+        status: "approved",
+        reviewedAt: new Date(),
+        reviewedBy: req.user._id,
+        deadlineHours,
+        note: String(req.body.note || "").trim().slice(0, 1000),
+      };
+      booking.adminResponseMessage = `Booking approved by service provider. Payment purpose: ${paymentReason}`;
+
+      try {
+        await sendManualBookingApprovedEmail({
+          customerEmail: booking.touristId?.email || booking.bookingDetails?.email,
+          customerName: booking.touristId?.name || booking.bookingDetails?.fullName,
+          businessName: business.name,
+          bookingId: booking._id,
+          amount: total,
+          depositAmount,
+          deadlineAt,
+          paymentUrl: buildPaymentUrl(booking._id),
+        });
+      } catch (emailError) {
+        console.warn("Manual booking approval email failed:", emailError.message);
+      }
+    } else {
+      booking.status = "cancelled";
+      booking.sellerApproval = {
+        ...(booking.sellerApproval || {}),
+        status: "rejected",
+        reviewedAt: new Date(),
+        reviewedBy: req.user._id,
+        rejectionReason: String(req.body.reason || "Service provider rejected this booking.").trim().slice(0, 1000),
+      };
+      booking.adminResponseMessage = booking.sellerApproval.rejectionReason;
+    }
+
     await booking.save();
 
     if (status === "cancelled" && booking.roomId) {
@@ -512,8 +641,10 @@ const updateBookingStatus = async (req, res) => {
     });
 
     return res.json({
-      message: "Booking status updated successfully.",
-      booking,
+      message: status === "confirmed"
+        ? "Booking approved. Customer was notified to pay in the system."
+        : "Booking cancelled.",
+      booking: sanitizeSellerBooking(booking),
     });
   } catch (error) {
     return res.status(500).json({
@@ -658,6 +789,23 @@ const upsertMyService = async (req, res) => {
     const title = String(req.body.title || name || "").trim();
     if (!category || !title) {
       return res.status(400).json({ message: "category and business name are required." });
+    }
+    const earlyPromotionInput = req.body.promotion && typeof req.body.promotion === "object"
+      ? req.body.promotion
+      : {};
+    const earlyPromotionEnabled = req.body.promotionEnabled === true || earlyPromotionInput.enabled === true;
+    const earlyPromotionPercent = Number(
+      req.body.promotionPercent ??
+      req.body.promotionPercentOfPrice ??
+      earlyPromotionInput.percent ??
+      earlyPromotionInput.promotionPercent ??
+      0
+    );
+    if (
+      earlyPromotionEnabled &&
+      (!Number.isFinite(earlyPromotionPercent) || earlyPromotionPercent <= 0 || earlyPromotionPercent > 100)
+    ) {
+      return res.status(400).json({ message: "Promotion percent must be greater than 0 and less than or equal to 100." });
     }
     const quantity = Math.max(0, Number(req.body.availableQuantity || req.body.quantityRemaining || 1));
     const serviceLocation = normalizeServiceLocation(req.body.serviceLocation || req.body.locationDetails || {});

@@ -1,9 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const crypto = require("crypto");
 const User = require("../src/models/User");
 const { createSeller } = require("../src/controllers/adminController");
 const {
   completeProviderRegistration,
+  verifyEmailOtp,
   login,
 } = require("../src/controllers/authController");
 
@@ -20,11 +22,14 @@ const response = () => ({
   },
 });
 
-test("admin credentials complete provider onboarding and enable login", async (context) => {
+test("admin seller ID completes service provider onboarding and email verification enables login", async (context) => {
   process.env.JWT_SECRET = "provider-auth-flow-test-secret";
+  process.env.AUTH_OTP_RESEND_COOLDOWN_SECONDS = "0";
   let storedUser = null;
   const originalFindOne = User.findOne;
   const originalCreate = User.create;
+  const originalExists = User.exists;
+  const originalRandomInt = crypto.randomInt;
 
   User.findOne = async (query) => {
     if (!storedUser || query.email !== storedUser.email) return null;
@@ -32,6 +37,10 @@ test("admin credentials complete provider onboarding and enable login", async (c
     if (query.mustSetPassword !== undefined && query.mustSetPassword !== storedUser.mustSetPassword) return null;
     if (query.role?.$in && !query.role.$in.includes(storedUser.role)) return null;
     return storedUser;
+  };
+  User.exists = async (query) => {
+    if (storedUser && query.sellerId === storedUser.sellerId) return { _id: storedUser._id };
+    return null;
   };
   User.create = async (data) => {
     storedUser = {
@@ -41,10 +50,13 @@ test("admin credentials complete provider onboarding and enable login", async (c
     };
     return storedUser;
   };
+  crypto.randomInt = () => 123456;
 
   context.after(() => {
     User.findOne = originalFindOne;
     User.create = originalCreate;
+    User.exists = originalExists;
+    crypto.randomInt = originalRandomInt;
   });
 
   const createResponse = response();
@@ -53,13 +65,14 @@ test("admin credentials complete provider onboarding and enable login", async (c
     createResponse
   );
   assert.equal(createResponse.statusCode, 201);
-  assert.match(createResponse.body.credentials.sellerId, /^SELLER-/);
-  assert.ok(createResponse.body.credentials.generatedPassword);
+  assert.match(createResponse.body.credentials.sellerId, /^SP\d{3,4}$/);
+  assert.equal(createResponse.body.credentials.generatedPassword, undefined);
+  assert.equal(storedUser.password, "");
   assert.equal(storedUser.mustSetPassword, true);
 
   const blockedLoginResponse = response();
   await login(
-    { body: { email: "provider@example.com", password: createResponse.body.credentials.generatedPassword } },
+    { body: { email: "provider@example.com", password: "NewProviderPassword123!" } },
     blockedLoginResponse
   );
   assert.equal(blockedLoginResponse.statusCode, 403);
@@ -71,6 +84,7 @@ test("admin credentials complete provider onboarding and enable login", async (c
       body: {
         ...createResponse.body.credentials,
         newPassword,
+        confirmPassword: newPassword,
       },
     },
     completionResponse
@@ -78,6 +92,21 @@ test("admin credentials complete provider onboarding and enable login", async (c
   assert.equal(completionResponse.statusCode, 200);
   assert.equal(completionResponse.body.user.sellerId, createResponse.body.credentials.sellerId);
   assert.equal(storedUser.mustSetPassword, false);
+  assert.equal(storedUser.emailVerified, false);
+  assert.equal(completionResponse.body.emailVerification.sent, true);
+
+  const unverifiedLoginResponse = response();
+  await login(
+    { body: { email: "provider@example.com", password: newPassword } },
+    unverifiedLoginResponse
+  );
+  assert.equal(unverifiedLoginResponse.statusCode, 403);
+  assert.equal(unverifiedLoginResponse.body.code, "EMAIL_NOT_VERIFIED");
+
+  const verifyResponse = response();
+  await verifyEmailOtp({ body: { email: "provider@example.com", otp: "123456" } }, verifyResponse);
+  assert.equal(verifyResponse.statusCode, 200);
+  assert.equal(storedUser.emailVerified, true);
 
   const loginResponse = response();
   await login(

@@ -5,7 +5,7 @@ const Hotel = require("../models/Hotel");
 const Room = require("../models/Room");
 const Supplier = require("../models/Supplier");
 const { generateToken, buildUserPayload } = require("../utils/auth");
-const { prefixedCode } = require("../utils/secureIds");
+const { generateUniqueSellerId } = require("../utils/sellerIds");
 const {
   sendProviderOnboardingEmail,
   sendEmailVerificationOtp,
@@ -350,7 +350,7 @@ const login = async (req, res) => {
     }
     if (["hotel", "supplier"].includes(user.role) && user.mustSetPassword) {
       return res.status(403).json({
-        message: "Provider account must complete onboarding before login.",
+        message: "Service provider account must complete onboarding before login.",
       });
     }
     if (!user.password) {
@@ -550,15 +550,17 @@ const registerBusinessByAdmin = async (req, res) => {
 
     let owner = null;
     let onboardingCredentials = null;
+    let credentialEmailSent = false;
+    let credentialEmailWarning = "";
     if (normalizedEmail && normalizedOwnerName) {
-      const sellerId = prefixedCode("SELLER", 8);
-      const generatedPassword = prefixedCode("SCN", 14);
-      const temporaryHash = await bcrypt.hash(generatedPassword, 12);
+      const sellerId = await generateUniqueSellerId({
+        exists: (candidate) => User.exists({ sellerId: candidate }),
+      });
 
       owner = await User.create({
         name: normalizedOwnerName,
         email: normalizedEmail,
-        password: temporaryHash,
+        password: "",
         role: "hotel",
         sellerId,
         hotelId: hotel._id,
@@ -572,15 +574,24 @@ const registerBusinessByAdmin = async (req, res) => {
       onboardingCredentials = {
         providerName: normalizedOwnerName,
         providerEmail: normalizedEmail,
+        serviceProviderName: normalizedOwnerName,
+        serviceProviderEmail: normalizedEmail,
         sellerId,
-        generatedPassword,
       };
 
-      await sendProviderOnboardingEmail({
-        providerEmail: normalizedEmail,
-        businessName: hotel.name,
-        providerName: normalizedOwnerName,
-      });
+      try {
+        await sendProviderOnboardingEmail({
+          providerEmail: normalizedEmail,
+          businessName: hotel.name,
+          providerName: normalizedOwnerName,
+          sellerId,
+        });
+        credentialEmailSent = true;
+      } catch (emailError) {
+        credentialEmailWarning =
+          "Business and service provider account were created, but seller ID email delivery failed.";
+        console.warn("Service provider seller ID email delivery failed:", emailError.message);
+      }
     }
 
     if (businessConfig.createsRooms) {
@@ -605,12 +616,20 @@ const registerBusinessByAdmin = async (req, res) => {
       business: hotel,
       providerEmail: owner ? normalizedEmail : "",
       providerName: owner ? normalizedOwnerName : "",
+      serviceProviderEmail: owner ? normalizedEmail : "",
+      serviceProviderName: owner ? normalizedOwnerName : "",
       registrationPath: owner ? "/provider-register" : "",
+      serviceProviderRegistrationPath: owner ? "/provider-register" : "",
       credentials: onboardingCredentials,
+      credentialEmail: {
+        sent: credentialEmailSent,
+        warning: credentialEmailWarning,
+      },
       message:
-        owner
-          ? "Business registered by admin. The provider must complete registration to set a password."
-          : "Business registered by admin successfully.",
+        credentialEmailWarning ||
+        (owner
+          ? "Business registered by admin. The service provider must complete registration to set a password."
+          : "Business registered by admin successfully."),
     });
   } catch (error) {
     return res
@@ -627,20 +646,19 @@ const completeProviderRegistration = async (req, res) => {
       sellerId,
       generatedPassword,
       newPassword,
+      confirmPassword,
     } = req.body;
 
     if (
       !providerName ||
       !providerEmail ||
       !sellerId ||
-      !generatedPassword ||
       !newPassword
     ) {
       return res
         .status(400)
         .json({
-          message:
-            "Provider name, provider email, seller ID, generated password, and new password are required.",
+          message: "Service provider name, email, seller ID, and new password are required.",
         });
     }
 
@@ -648,6 +666,9 @@ const completeProviderRegistration = async (req, res) => {
       return res.status(400).json({
         message: "New password must be at least 8 characters long.",
       });
+    }
+    if (confirmPassword !== undefined && String(confirmPassword) !== String(newPassword)) {
+      return res.status(400).json({ message: "Password confirmation does not match." });
     }
 
     const normalizedEmail = String(providerEmail).toLowerCase().trim();
@@ -661,42 +682,60 @@ const completeProviderRegistration = async (req, res) => {
 
     if (!user) {
       return res.status(404).json({
-        message: "Provider onboarding account not found. Check the credentials supplied by the admin.",
+        message: "Service provider onboarding account not found. Check the seller ID supplied by the admin.",
       });
     }
 
     if (user.name.trim().toLowerCase() !== String(providerName).trim().toLowerCase()) {
       return res
         .status(400)
-        .json({ message: "Provider name does not match the admin-created account." });
+        .json({ message: "Service provider name does not match the admin-created account." });
     }
 
-    const generatedPasswordMatches = await bcrypt.compare(
-      String(generatedPassword),
-      user.password
-    );
-    if (!generatedPasswordMatches) {
-      return res.status(401).json({ message: "Generated password is incorrect." });
+    if (generatedPassword && user.password) {
+      const generatedPasswordMatches = await bcrypt.compare(
+        String(generatedPassword),
+        user.password
+      );
+      if (!generatedPasswordMatches) {
+        return res.status(401).json({ message: "Invalid onboarding credentials." });
+      }
+    }
+    if (!generatedPassword && user.password) {
+      return res.status(401).json({ message: "Invalid onboarding credentials." });
     }
 
     user.password = await bcrypt.hash(String(newPassword), 12);
     user.mustSetPassword = false;
-    user.emailVerified = true;
-    user.emailVerifiedAt = user.emailVerifiedAt || new Date();
+    user.emailVerified = false;
+    user.emailVerifiedAt = null;
     user.emailVerificationOtpHash = "";
     user.emailVerificationOtpExpiresAt = null;
     user.emailVerificationOtpAttempts = 0;
     await user.save();
 
+    let emailVerificationSent = false;
+    try {
+      const otpResult = await issueEmailVerificationOtp(user);
+      emailVerificationSent = Boolean(otpResult.sent);
+    } catch (emailError) {
+      console.warn("Service provider email verification OTP delivery failed:", emailError.message);
+    }
+
     const token = generateToken(user);
     return res.json({
       user: await buildAuthUserPayload(user),
       token,
-      message: "Provider registration completed. You can now login.",
+      message: "Service provider registration completed. Verify your email before logging in.",
+      emailVerification: {
+        required: true,
+        sent: emailVerificationSent,
+        expiresInMinutes: OTP_EXPIRY_MINUTES,
+      },
     });
   } catch (error) {
     return res.status(500).json({
-      message: "Failed to complete provider registration.",
+      message: "Failed to complete service provider registration.",
       error: error.message,
     });
   }

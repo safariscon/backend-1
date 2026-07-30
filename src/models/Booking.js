@@ -152,6 +152,16 @@ const bookingSchema = new mongoose.Schema(
       default: 1,
       min: 1,
     },
+    numberOfPeople: {
+      type: Number,
+      default: 1,
+      min: 1,
+    },
+    totalConsumptionUnits: {
+      type: Number,
+      default: 1,
+      min: 1,
+    },
     amountPaid: {
       type: Number,
       default: 0,
@@ -280,6 +290,24 @@ const bookingSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    bookingDate: {
+      type: Date,
+      default: null,
+    },
+    endBookingDate: {
+      type: Date,
+      default: null,
+    },
+    startTime: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    endTime: {
+      type: String,
+      default: "",
+      trim: true,
+    },
     guests: {
       type: Number,
       default: 1,
@@ -288,6 +316,19 @@ const bookingSchema = new mongoose.Schema(
     bookingDetails: {
       type: mongoose.Schema.Types.Mixed,
       default: {},
+    },
+    customerLocation: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 500,
+    },
+    customerLocationDetails: {
+      province: { type: String, default: "", trim: true },
+      district: { type: String, default: "", trim: true },
+      sector: { type: String, default: "", trim: true },
+      cell: { type: String, default: "", trim: true },
+      village: { type: String, default: "", trim: true },
     },
     bookingMode: {
       type: String,
@@ -444,6 +485,25 @@ const bookingSchema = new mongoose.Schema(
       default: "",
       trim: true,
       maxlength: 500,
+    },
+    paymentDeadlineAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    sellerApproval: {
+      status: {
+        type: String,
+        enum: ["not_required", "pending", "approved", "rejected", "expired"],
+        default: "pending",
+        index: true,
+      },
+      requestedAt: { type: Date, default: null },
+      reviewedAt: { type: Date, default: null },
+      reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+      deadlineHours: { type: Number, default: 24, min: 1, max: 2160 },
+      note: { type: String, default: "", trim: true, maxlength: 1000 },
+      rejectionReason: { type: String, default: "", trim: true, maxlength: 1000 },
     },
     isAcknowledgedByAdmin: {
       type: Boolean,

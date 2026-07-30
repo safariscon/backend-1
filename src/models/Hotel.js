@@ -167,7 +167,7 @@ const hotelSchema = new mongoose.Schema(
     },
     commissionPercentage: {
       type: Number,
-      default: 10,
+      default: 5,
       min: 0,
       max: 100,
     },

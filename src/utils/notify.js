@@ -96,26 +96,37 @@ const sendProviderOnboardingEmail = async ({
   providerEmail,
   businessName,
   providerName,
+  sellerId,
 }) =>
   sendMail({
     to: providerEmail,
-    subject: "Complete your SafarisCon provider registration",
+    subject: "Complete your SafarisCon service provider registration",
     text: [
-      `Hello ${providerName || "provider"},`,
-      `Your provider account for ${businessName} has been created.`,
-      "Use the seller ID and generated password from the admin to complete registration and set your password.",
+      `Hello ${providerName || "service provider"},`,
+      businessName
+        ? `Your service provider account for ${businessName} has been created.`
+        : "Your service provider account has been created.",
+      "Use this seller ID to complete registration and create your password:",
+      `Seller ID: ${sellerId}`,
+      "After creating your password, you will receive an email verification code before you can log in.",
     ].join("\n\n"),
     html: `
       <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;">
-        <h2 style="margin:0 0 16px;color:#111827;">Complete your provider registration</h2>
+        <h2 style="margin:0 0 16px;color:#111827;">Complete your service provider registration</h2>
         ${paragraphHtml([
-          `Hello ${providerName || "provider"},`,
-          `Your provider account for ${businessName} has been created.`,
-          "Use the seller ID and generated password from the admin to complete registration and set your password.",
+          `Hello ${providerName || "service provider"},`,
+          businessName
+            ? `Your service provider account for ${businessName} has been created.`
+            : "Your service provider account has been created.",
+          "Use this seller ID to complete registration and create your password:",
         ])}
+        <div style="background:#f3f4f6;border-radius:8px;padding:16px;margin:16px 0;color:#111827;">
+          <p style="margin:0;"><strong>Seller ID:</strong> ${escapeHtml(sellerId)}</p>
+        </div>
+        ${paragraphHtml(["After creating your password, you will receive an email verification code before you can log in."])}
       </div>
     `,
-    simulationMessage: `Sent onboarding email to ${providerEmail} for business "${businessName}" and provider "${providerName}". The provider must complete registration to set a password.`,
+    simulationMessage: `Sent service provider onboarding email with seller ID ${sellerId} to ${providerEmail} for business "${businessName || "service provider account"}" and service provider "${providerName}".`,
   });
 
 const sendEmailVerificationOtp = async ({ email, name, otp, expiresInMinutes }) =>
@@ -158,8 +169,108 @@ const sendPasswordResetOtp = async ({ email, name, otp, expiresInMinutes }) =>
     simulationMessage: `Sent password reset OTP ${otp} to ${email} for "${name || "user"}". It expires in ${expiresInMinutes} minutes.`,
   });
 
+const sendServiceProviderBookingRequestEmail = async ({
+  serviceProviderEmail,
+  serviceProviderName,
+  businessName,
+  bookingId,
+}) =>
+  sendMail({
+    to: serviceProviderEmail,
+    subject: "New SafarisCon booking request needs approval",
+    text: [
+      `Hello ${serviceProviderName || "service provider"},`,
+      `A customer requested ${businessName || "your service"}.`,
+      `Booking ID: ${bookingId}`,
+      "Review the request in your SafarisCon dashboard. Customer contact details stay hidden until payment is completed in the system.",
+    ].join("\n\n"),
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;">
+        <h2 style="margin:0 0 16px;color:#111827;">New booking request</h2>
+        ${paragraphHtml([
+          `Hello ${serviceProviderName || "service provider"},`,
+          `A customer requested ${businessName || "your service"}.`,
+          `Booking ID: ${bookingId}`,
+          "Review the request in your SafarisCon dashboard. Customer contact details stay hidden until payment is completed in the system.",
+        ])}
+      </div>
+    `,
+    simulationMessage: `Sent manual booking request email to service provider ${serviceProviderEmail} for booking ${bookingId}.`,
+  });
+
+const sendManualBookingApprovedEmail = async ({
+  customerEmail,
+  customerName,
+  businessName,
+  bookingId,
+  amount,
+  depositAmount,
+  deadlineAt,
+  paymentUrl,
+}) =>
+  sendMail({
+    to: customerEmail,
+    subject: "Your SafarisCon booking was approved",
+    text: [
+      `Hello ${customerName || "there"},`,
+      `Your booking for ${businessName || "the requested service"} was approved.`,
+      `Booking ID: ${bookingId}`,
+      `Total amount: RWF ${Number(amount || 0).toLocaleString("en-US")}`,
+      `Amount to pay now: RWF ${Number(depositAmount || 0).toLocaleString("en-US")}`,
+      deadlineAt ? `Payment deadline: ${new Date(deadlineAt).toLocaleString("en-US")}` : "",
+      paymentUrl ? `Pay in SafarisCon: ${paymentUrl}` : "Open SafarisCon to complete payment.",
+    ].filter(Boolean).join("\n\n"),
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;">
+        <h2 style="margin:0 0 16px;color:#111827;">Booking approved</h2>
+        ${paragraphHtml([
+          `Hello ${customerName || "there"},`,
+          `Your booking for ${businessName || "the requested service"} was approved.`,
+          `Booking ID: ${bookingId}`,
+          `Total amount: RWF ${Number(amount || 0).toLocaleString("en-US")}`,
+          `Amount to pay now: RWF ${Number(depositAmount || 0).toLocaleString("en-US")}`,
+          deadlineAt ? `Payment deadline: ${new Date(deadlineAt).toLocaleString("en-US")}` : "",
+          paymentUrl ? `Pay in SafarisCon: ${paymentUrl}` : "Open SafarisCon to complete payment.",
+        ].filter(Boolean))}
+      </div>
+    `,
+    simulationMessage: `Sent manual booking approval email to customer ${customerEmail} for booking ${bookingId}.`,
+  });
+
+const sendBusinessApprovedEmail = async ({
+  serviceProviderEmail,
+  serviceProviderName,
+  businessName,
+  commissionPercentage,
+}) =>
+  sendMail({
+    to: serviceProviderEmail,
+    subject: "Your SafarisCon business was approved",
+    text: [
+      `Hello ${serviceProviderName || "service provider"},`,
+      `${businessName || "Your business"} has been approved and is now available on SafarisCon.`,
+      `Platform commission: ${Number(commissionPercentage || 0)}% of each paid booking for this business.`,
+      "This commission is part of the SafarisCon service provider terms and will be shown in your dashboard for this business.",
+    ].join("\n\n"),
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;">
+        <h2 style="margin:0 0 16px;color:#111827;">Business approved</h2>
+        ${paragraphHtml([
+          `Hello ${serviceProviderName || "service provider"},`,
+          `${businessName || "Your business"} has been approved and is now available on SafarisCon.`,
+          `Platform commission: ${Number(commissionPercentage || 0)}% of each paid booking for this business.`,
+          "This commission is part of the SafarisCon service provider terms and will be shown in your dashboard for this business.",
+        ])}
+      </div>
+    `,
+    simulationMessage: `Sent business approval email to ${serviceProviderEmail} for "${businessName}" with ${Number(commissionPercentage || 0)}% commission.`,
+  });
+
 module.exports = {
   sendProviderOnboardingEmail,
+  sendServiceProviderBookingRequestEmail,
+  sendManualBookingApprovedEmail,
+  sendBusinessApprovedEmail,
   sendEmailVerificationOtp,
   sendPasswordResetOtp,
 };

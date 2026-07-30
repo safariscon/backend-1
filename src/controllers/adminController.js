@@ -8,9 +8,10 @@ const Transaction = require("../models/Transaction");
 const SiteSetting = require("../models/SiteSetting");
 const AuditLog = require("../models/AuditLog");
 const { normalizePriceOption, hasCompleteAutomaticRules, getAutomaticRuleDefaults } = require("../services/automaticBookingService");
-const bcrypt = require("bcrypt");
 const { registerBusinessByAdmin } = require("./authController");
 const { prefixedCode, secureToken } = require("../utils/secureIds");
+const { generateUniqueSellerId } = require("../utils/sellerIds");
+const { sendProviderOnboardingEmail, sendBusinessApprovedEmail } = require("../utils/notify");
 const {
   REALTIME_EVENTS,
   emitHotelRealtime,
@@ -26,7 +27,7 @@ const createSeller = async (req, res) => {
     const name = String(req.body.providerName || "").trim();
     const email = String(req.body.providerEmail || "").toLowerCase().trim();
     if (!name || !email) {
-      return res.status(400).json({ message: "Provider name and email are required." });
+      return res.status(400).json({ message: "Service provider name and email are required." });
     }
 
     const existing = await User.findOne({ email });
@@ -34,21 +35,35 @@ const createSeller = async (req, res) => {
       return res.status(409).json({ message: "A user with this email already exists." });
     }
 
-    const sellerId = prefixedCode("SELLER", 8);
-    const generatedPassword = prefixedCode("SCN", 14);
-    const hashedPassword = await bcrypt.hash(generatedPassword, 12);
+    const sellerId = await generateUniqueSellerId({
+      exists: (candidate) => User.exists({ sellerId: candidate }),
+    });
 
     const user = await User.create({
       name,
       email,
-      password: hashedPassword,
+      password: "",
       role: "hotel",
       sellerId,
       mustSetPassword: true,
     });
 
+    let credentialEmailSent = false;
+    let credentialEmailWarning = "";
+    try {
+      await sendProviderOnboardingEmail({
+        providerEmail: email,
+        providerName: name,
+        sellerId,
+      });
+      credentialEmailSent = true;
+    } catch (emailError) {
+      credentialEmailWarning = "Service provider account was created, but seller ID email delivery failed.";
+      console.warn("Service provider seller ID email delivery failed:", emailError.message);
+    }
+
     return res.status(201).json({
-      message: "Provider account created successfully.",
+      message: credentialEmailWarning || "Service provider account created successfully.",
       seller: {
         id: user._id,
         name: user.name,
@@ -59,8 +74,13 @@ const createSeller = async (req, res) => {
       credentials: {
         providerName: name,
         providerEmail: email,
+        serviceProviderName: name,
+        serviceProviderEmail: email,
         sellerId,
-        generatedPassword,
+      },
+      credentialEmail: {
+        sent: credentialEmailSent,
+        warning: credentialEmailWarning,
       },
     });
   } catch (error) {
@@ -99,13 +119,14 @@ const updateBusinessVerification = async (req, res) => {
         : requestedStatus === "rejected"
           ? "rejected"
           : "pending";
+    const commissionPercentage = Math.max(0, Math.min(100, Number(req.body.commissionPercentage ?? 5)));
 
     const business = await Hotel.findByIdAndUpdate(
       businessId,
       {
         $set: {
           approvalStatus,
-          ...(approvalStatus === "approved" ? { status: "available" } : {}),
+          ...(approvalStatus === "approved" ? { status: "available", commissionPercentage } : {}),
         },
         ...(approvalStatus === "approved"
           ? { $max: { availableQuantity: 1, quantityRemaining: 1 } }
@@ -114,6 +135,23 @@ const updateBusinessVerification = async (req, res) => {
       { returnDocument: "after", runValidators: true }
     );
     if (!business) return res.status(404).json({ message: "Business not found." });
+    if (approvalStatus === "approved") {
+      try {
+        await business.populate("ownerUserId", "name email");
+        const serviceProviderEmail =
+          business.ownerUserId?.email || business.sellerContactEmail || business.ownerEmail;
+        if (serviceProviderEmail && !/@business\.local$|@seller\.local$/i.test(serviceProviderEmail)) {
+          await sendBusinessApprovedEmail({
+            serviceProviderEmail,
+            serviceProviderName: business.ownerUserId?.name || business.name,
+            businessName: business.name,
+            commissionPercentage: business.commissionPercentage,
+          });
+        }
+      } catch (emailError) {
+        console.warn("Business approval email failed:", emailError.message);
+      }
+    }
 
     emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, {
       reason: "business-approval-updated",
@@ -185,6 +223,15 @@ const approveBooking = async (req, res) => {
     }
     if (paymentReason.length > 500) {
       return res.status(400).json({ message: "Payment reason must be 500 characters or fewer." });
+    }
+    const existingForPolicy = await Booking.findById(bookingId).select("bookingMode preferredHotelId hotelId status");
+    if (
+      existingForPolicy?.bookingMode === "manual" &&
+      (existingForPolicy.preferredHotelId || existingForPolicy.hotelId)
+    ) {
+      return res.status(409).json({
+        message: "Manual service bookings must be approved by the assigned service provider.",
+      });
     }
     const booking = await Booking.findOneAndUpdate(
       {
@@ -332,7 +379,7 @@ const updateMarketplaceSettings = async (req, res) => {
       .map((rule) => String(rule || "").trim())
       .filter(Boolean)
       .slice(0, 20);
-    const defaultCommissionPercentage = Math.max(0, Math.min(100, Number(req.body.defaultCommissionPercentage) || 10));
+    const defaultCommissionPercentage = Math.max(0, Math.min(100, Number(req.body.defaultCommissionPercentage) || 5));
     const bookingMode = ["manual", "automatic", "service-level"].includes(req.body.bookingMode)
       ? req.body.bookingMode
       : "manual";
@@ -395,7 +442,7 @@ const updateServiceBookingMode = async (req, res) => {
     if (!business) return res.status(404).json({ message: "Service not found." });
     await SiteSetting.findOneAndUpdate(
       { key: "marketplace-settings" },
-      { $set: { "value.bookingMode": "service-level" }, $setOnInsert: { "value.depositPercentage": 30, "value.defaultCommissionPercentage": 10, "value.bookingRules": [] } },
+      { $set: { "value.bookingMode": "service-level" }, $setOnInsert: { "value.depositPercentage": 30, "value.defaultCommissionPercentage": 5, "value.bookingRules": [] } },
       { upsert: true, returnDocument: "after" }
     );
     if (AuditLog.db.readyState === 1) await AuditLog.create({ action: "admin-changed-service-booking-mode", actorId: req.user._id, actorRole: req.user.role, businessId: business._id, metadata: { bookingMode, legacyRulesCompleted: Boolean(automaticTable) } });
@@ -406,33 +453,91 @@ const updateServiceBookingMode = async (req, res) => {
   }
 };
 
-const listTransactions = async (_req, res) => {
+const listTransactions = async (req, res) => {
   try {
-    const transactions = await Transaction.find({})
-      .populate("bookingId", "bookingCode status paymentStatus")
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit || 25)));
+    const skip = (page - 1) * limit;
+    const filter = {};
+    const createdAt = {};
+    if (req.query.from) createdAt.$gte = new Date(req.query.from);
+    if (req.query.to) createdAt.$lte = new Date(req.query.to);
+    if (Object.keys(createdAt).length) filter.createdAt = createdAt;
+    if (req.query.status) filter.status = String(req.query.status);
+    if (req.query.businessId) filter.businessId = req.query.businessId;
+
+    const [transactions, total, summaryRows, dailyRows, hourlyRows] = await Promise.all([
+      Transaction.find(filter)
+      .populate("bookingId", "_id status paymentStatus totalPrice commissionPercentage commissionAmount createdAt")
       .populate("userId", "name email")
       .populate("sellerId", "name email sellerId")
       .populate("businessId", "name type payoutDetails commissionPercentage")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit),
+      Transaction.countDocuments(filter),
+      Transaction.aggregate([
+        { $match: filter },
+        {
+          $group: {
+            _id: null,
+            totalReceived: { $sum: { $cond: [{ $eq: ["$status", "paid"] }, "$amount", 0] } },
+            commissionCollected: { $sum: { $cond: [{ $and: [{ $eq: ["$status", "paid"] }, { $eq: ["$commissionStatus", "collected"] }] }, "$commissionAmount", 0] } },
+            commissionDue: { $sum: { $cond: [{ $and: [{ $eq: ["$status", "paid"] }, { $eq: ["$commissionStatus", "pending"] }] }, "$commissionAmount", 0] } },
+            pendingPayments: { $sum: { $cond: [{ $ne: ["$status", "paid"] }, "$amount", 0] } },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      Transaction.aggregate([
+        { $match: filter },
+        {
+          $group: {
+            _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+            totalReceived: { $sum: { $cond: [{ $eq: ["$status", "paid"] }, "$amount", 0] } },
+            commissionAmount: { $sum: "$commissionAmount" },
+            bookings: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: -1 } },
+      ]),
+      Transaction.aggregate([
+        { $match: filter },
+        {
+          $group: {
+            _id: {
+              day: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+              hour: { $hour: "$createdAt" },
+            },
+            totalReceived: { $sum: { $cond: [{ $eq: ["$status", "paid"] }, "$amount", 0] } },
+            commissionAmount: { $sum: "$commissionAmount" },
+            bookings: { $sum: 1 },
+          },
+        },
+        { $sort: { "_id.day": -1, "_id.hour": -1 } },
+      ]),
+    ]);
 
-    const summary = transactions.reduce(
-      (acc, tx) => {
-        if (tx.status === "paid") {
-          acc.totalReceived += Number(tx.amount || 0);
-          if (tx.commissionStatus === "collected") {
-            acc.commissionEarned += Number(tx.commissionAmount || 0);
-          } else if (tx.commissionStatus !== "waived") {
-            acc.commissionDue += Number(tx.commissionAmount || 0);
-          }
-        } else {
-          acc.pendingPayments += Number(tx.amount || 0);
-        }
-        return acc;
+    const summary = summaryRows[0] || {
+      totalReceived: 0,
+      commissionCollected: 0,
+      commissionDue: 0,
+      pendingPayments: 0,
+      count: 0,
+    };
+
+    return res.json({
+      transactions,
+      summary,
+      daily: dailyRows.map((row) => ({ date: row._id, totalReceived: row.totalReceived, commissionAmount: row.commissionAmount, bookings: row.bookings })),
+      hourly: hourlyRows.map((row) => ({ date: row._id.day, hour: row._id.hour, totalReceived: row.totalReceived, commissionAmount: row.commissionAmount, bookings: row.bookings })),
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
       },
-      { totalReceived: 0, commissionEarned: 0, commissionDue: 0, pendingPayments: 0 }
-    );
-
-    return res.json({ transactions, summary });
+    });
   } catch (error) {
     return res.status(500).json({ message: "Failed to fetch transactions.", error: error.message });
   }
