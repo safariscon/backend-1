@@ -6,12 +6,18 @@ const connectDB = require("../config/db");
 
 dotenv.config({ quiet: true });
 
+const DEFAULT_ADMIN = {
+  email: "theodufi.rw@gmail.com",
+  name: "Theoneste Kalix",
+  password: "admin@1234",
+};
+
 const seedAdmin = async () => {
-  const adminEmail = (process.env.ADMIN_EMAIL || "theodufi.rw@gmail.com")
+  const adminEmail = (process.env.SEED_ADMIN_EMAIL || DEFAULT_ADMIN.email)
     .toLowerCase()
     .trim();
-  const adminName = (process.env.ADMIN_NAME || "Theoneste Kalix").trim();
-  const adminPassword = process.env.ADMIN_PASSWORD || "admin@1234";
+  const adminName = (process.env.SEED_ADMIN_NAME || DEFAULT_ADMIN.name).trim();
+  const adminPassword = process.env.SEED_ADMIN_PASSWORD || DEFAULT_ADMIN.password;
 
   const existing = await User.findOne({ email: adminEmail });
   const hashedPassword = await bcrypt.hash(adminPassword, 10);
