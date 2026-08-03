@@ -24,6 +24,8 @@ const getMailerConfig = () => {
 let transporter = null;
 let transporterKey = "";
 
+// this is a comment
+
 const getTransporter = () => {
   const config = getMailerConfig();
   if (!config.configured) return null;
