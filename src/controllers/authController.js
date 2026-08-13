@@ -4,12 +4,23 @@ const User = require("../models/User");
 const Hotel = require("../models/Hotel");
 const Room = require("../models/Room");
 const Supplier = require("../models/Supplier");
-const { generateToken, buildUserPayload } = require("../utils/auth");
+const {
+  ACCESS_TOKEN_TTL_SECONDS,
+  REFRESH_TOKEN_TTL_SECONDS,
+  generateAccessToken,
+  generateRefreshToken,
+  generateToken,
+  hashToken,
+  isRefreshTokenPayload,
+  verifyAuthToken,
+  buildUserPayload,
+} = require("../utils/auth");
 const { generateUniqueSellerId } = require("../utils/sellerIds");
 const {
   sendProviderOnboardingEmail,
   sendEmailVerificationOtp,
   sendPasswordResetOtp,
+  sendLoginOtp,
 } = require("../utils/notify");
 const { REALTIME_EVENTS, emitRealtime } = require("../utils/realtime");
 
@@ -31,6 +42,57 @@ const buildGenericOtpResponse = (message) => ({
 });
 
 const canSendOtp = (lastSentAt) => secondsSince(lastSentAt) >= OTP_RESEND_COOLDOWN_SECONDS;
+
+const parseRememberMe = (value) => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  return ["true", "1", "yes", "on"].includes(String(value || "").trim().toLowerCase());
+};
+
+const clearLoginOtp = (user) => {
+  user.loginOtpHash = "";
+  user.loginOtpExpiresAt = null;
+  user.loginOtpAttempts = 0;
+  user.loginRememberMe = false;
+};
+
+const clearRefreshSession = (user) => {
+  user.refreshTokenHash = "";
+  user.refreshTokenExpiresAt = null;
+};
+
+const buildTokenResponse = ({ userPayload, accessToken, refreshToken, rememberMe }) => ({
+  user: userPayload,
+  token: accessToken,
+  accessToken,
+  refreshToken: refreshToken || null,
+  rememberMe: Boolean(rememberMe),
+  accessTokenExpiresIn: ACCESS_TOKEN_TTL_SECONDS,
+  refreshTokenExpiresIn: rememberMe ? REFRESH_TOKEN_TTL_SECONDS : null,
+});
+
+const issueSessionTokens = async (user, rememberMe) => {
+  const accessToken = generateAccessToken(user);
+  let refreshToken = null;
+
+  if (rememberMe) {
+    refreshToken = generateRefreshToken(user);
+    user.refreshTokenHash = hashToken(refreshToken);
+    user.refreshTokenExpiresAt = minutesFromNow(REFRESH_TOKEN_TTL_SECONDS / 60);
+  } else {
+    clearRefreshSession(user);
+  }
+
+  clearLoginOtp(user);
+  await user.save();
+
+  return buildTokenResponse({
+    userPayload: await buildAuthUserPayload(user),
+    accessToken,
+    refreshToken,
+    rememberMe,
+  });
+};
 
 const issueEmailVerificationOtp = async (user) => {
   if (user.emailVerified) return { sent: false, alreadyVerified: true };
@@ -64,6 +126,27 @@ const issuePasswordResetOtp = async (user) => {
   await user.save();
 
   await sendPasswordResetOtp({
+    email: user.email,
+    name: user.name,
+    otp,
+    expiresInMinutes: OTP_EXPIRY_MINUTES,
+  });
+
+  return { sent: true };
+};
+
+const issueLoginOtp = async (user, rememberMe) => {
+  if (!canSendOtp(user.loginOtpSentAt)) return { sent: false, cooldown: true };
+
+  const otp = createOtp();
+  user.loginOtpHash = await bcrypt.hash(otp, 10);
+  user.loginOtpExpiresAt = minutesFromNow(OTP_EXPIRY_MINUTES);
+  user.loginOtpAttempts = 0;
+  user.loginOtpSentAt = new Date();
+  user.loginRememberMe = Boolean(rememberMe);
+  await user.save();
+
+  await sendLoginOtp({
     email: user.email,
     name: user.name,
     otp,
@@ -335,7 +418,7 @@ const buildAuthUserPayload = async (user) => {
 
 const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, rememberMe } = req.body;
 
     if (!email || !password) {
       return res
@@ -370,13 +453,166 @@ const login = async (req, res) => {
       });
     }
 
-    const token = generateToken(user);
+    const persistSession = parseRememberMe(rememberMe);
+    const otpResult = await issueLoginOtp(user, persistSession);
+    if (otpResult.cooldown) {
+      return res.status(429).json({
+        code: "LOGIN_OTP_COOLDOWN",
+        message: `Please wait ${OTP_RESEND_COOLDOWN_SECONDS} seconds before requesting another login code.`,
+        expiresInMinutes: OTP_EXPIRY_MINUTES,
+        email: user.email,
+        rememberMe: persistSession,
+      });
+    }
+
     return res.json({
-      user: await buildAuthUserPayload(user),
-      token,
+      code: "LOGIN_OTP_REQUIRED",
+      message: "A login verification code has been sent to your email.",
+      email: user.email,
+      rememberMe: persistSession,
+      expiresInMinutes: OTP_EXPIRY_MINUTES,
     });
   } catch (error) {
     return res.status(500).json({ message: "Login failed.", error: error.message });
+  }
+};
+
+const resendLoginOtp = async (req, res) => {
+  try {
+    const normalizedEmail = normalizeEmail(req.body.email);
+    if (!isValidEmail(normalizedEmail)) {
+      return res.status(400).json({ message: "A valid email address is required." });
+    }
+
+    const generic = buildGenericOtpResponse(
+      "If a login is in progress for this email, a new verification code has been sent."
+    );
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user || !user.loginOtpHash || !user.emailVerified || user.mustSetPassword) {
+      return res.json(generic);
+    }
+
+    const result = await issueLoginOtp(user, Boolean(user.loginRememberMe));
+    if (result.cooldown) {
+      return res.status(429).json({
+        code: "LOGIN_OTP_COOLDOWN",
+        message: `Please wait ${OTP_RESEND_COOLDOWN_SECONDS} seconds before requesting another login code.`,
+      });
+    }
+
+    return res.json(generic);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to resend login code.", error: error.message });
+  }
+};
+
+const verifyLoginOtp = async (req, res) => {
+  try {
+    const normalizedEmail = normalizeEmail(req.body.email);
+    const otp = String(req.body.otp || "").trim();
+    if (!isValidEmail(normalizedEmail) || !otp) {
+      return res.status(400).json({ message: "A valid email and OTP are required." });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) return res.status(404).json({ message: "User not found." });
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        code: "EMAIL_NOT_VERIFIED",
+        message: "Please verify your email before logging in.",
+        email: user.email,
+        emailVerified: false,
+      });
+    }
+
+    const verification = await verifyOtp({
+      user,
+      otp,
+      hashField: "loginOtpHash",
+      expiresField: "loginOtpExpiresAt",
+      attemptsField: "loginOtpAttempts",
+    });
+    if (!verification.ok) {
+      return res.status(verification.status).json({ message: verification.message });
+    }
+
+    const rememberMe = Boolean(user.loginRememberMe);
+    const session = await issueSessionTokens(user, rememberMe);
+    return res.json({
+      message: "Login successful.",
+      ...session,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to verify login code.", error: error.message });
+  }
+};
+
+const refreshSession = async (req, res) => {
+  try {
+    const refreshToken = String(req.body.refreshToken || "").trim();
+    if (!refreshToken) {
+      return res.status(400).json({ message: "refreshToken is required." });
+    }
+
+    let decoded;
+    try {
+      decoded = verifyAuthToken(refreshToken);
+    } catch (_error) {
+      return res.status(401).json({ message: "Invalid or expired refresh token." });
+    }
+
+    if (!isRefreshTokenPayload(decoded) || !decoded.id) {
+      return res.status(401).json({ message: "Invalid or expired refresh token." });
+    }
+
+    const user = await User.findById(decoded.id);
+    if (!user || !user.refreshTokenHash) {
+      return res.status(401).json({ message: "Invalid or expired refresh token." });
+    }
+    if (user.refreshTokenExpiresAt && new Date(user.refreshTokenExpiresAt).getTime() <= Date.now()) {
+      clearRefreshSession(user);
+      await user.save();
+      return res.status(401).json({ message: "Invalid or expired refresh token." });
+    }
+    if (user.refreshTokenHash !== hashToken(refreshToken)) {
+      return res.status(401).json({ message: "Invalid or expired refresh token." });
+    }
+
+    const session = await issueSessionTokens(user, true);
+    return res.json({
+      message: "Session refreshed.",
+      ...session,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to refresh session.", error: error.message });
+  }
+};
+
+const logout = async (req, res) => {
+  try {
+    const refreshToken = String(req.body?.refreshToken || "").trim();
+    let user = req.user || null;
+
+    if (!user && refreshToken) {
+      try {
+        const decoded = verifyAuthToken(refreshToken);
+        if (isRefreshTokenPayload(decoded) && decoded.id) {
+          user = await User.findById(decoded.id);
+        }
+      } catch (_error) {
+        user = null;
+      }
+    }
+
+    if (user) {
+      clearRefreshSession(user);
+      clearLoginOtp(user);
+      await user.save();
+    }
+
+    return res.json({ message: "Logged out." });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to logout.", error: error.message });
   }
 };
 
@@ -872,6 +1108,8 @@ const resetPassword = async (req, res) => {
     user.passwordResetOtpAttempts = 0;
     user.passwordChangedAt = new Date();
     user.mustSetPassword = false;
+    clearRefreshSession(user);
+    clearLoginOtp(user);
     await user.save();
 
     return res.json({
@@ -884,6 +1122,10 @@ const resetPassword = async (req, res) => {
 
 module.exports = {
   login,
+  resendLoginOtp,
+  verifyLoginOtp,
+  refreshSession,
+  logout,
   registerTourist,
   registerBusinessByAdmin,
   completeProviderRegistration,

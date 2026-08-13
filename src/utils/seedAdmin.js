@@ -38,6 +38,13 @@ const seedAdmin = async () => {
     passwordResetOtpExpiresAt: null,
     passwordResetOtpAttempts: 0,
     passwordResetOtpSentAt: null,
+    loginOtpHash: "",
+    loginOtpExpiresAt: null,
+    loginOtpAttempts: 0,
+    loginOtpSentAt: null,
+    loginRememberMe: false,
+    refreshTokenHash: "",
+    refreshTokenExpiresAt: null,
     passwordChangedAt: new Date(),
   };
 

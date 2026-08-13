@@ -1,5 +1,5 @@
-const jwt = require("jsonwebtoken");
 const User = require("../models/User");
+const { isAccessTokenPayload, verifyAuthToken } = require("../utils/auth");
 
 const protect = async (req, res, next) => {
   try {
@@ -12,7 +12,11 @@ const protect = async (req, res, next) => {
       return res.status(401).json({ message: "Unauthorized: token missing." });
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = verifyAuthToken(token);
+    if (!isAccessTokenPayload(decoded)) {
+      return res.status(401).json({ message: "Unauthorized: access token required." });
+    }
+
     const user = await User.findById(decoded.id).select("-password");
 
     if (!user) {
@@ -31,7 +35,8 @@ const optionalProtect = async (req, _res, next) => {
     const authHeader = req.headers.authorization || "";
     const token = authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
     if (!token) return next();
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = verifyAuthToken(token);
+    if (!isAccessTokenPayload(decoded)) return next();
     req.user = await User.findById(decoded.id).select("-password");
     return next();
   } catch (_error) {

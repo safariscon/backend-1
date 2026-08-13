@@ -90,6 +90,34 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    loginOtpHash: {
+      type: String,
+      default: "",
+    },
+    loginOtpExpiresAt: {
+      type: Date,
+      default: null,
+    },
+    loginOtpAttempts: {
+      type: Number,
+      default: 0,
+    },
+    loginOtpSentAt: {
+      type: Date,
+      default: null,
+    },
+    loginRememberMe: {
+      type: Boolean,
+      default: false,
+    },
+    refreshTokenHash: {
+      type: String,
+      default: "",
+    },
+    refreshTokenExpiresAt: {
+      type: Date,
+      default: null,
+    },
     passwordChangedAt: {
       type: Date,
       default: null,

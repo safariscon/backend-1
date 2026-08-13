@@ -171,6 +171,26 @@ const sendPasswordResetOtp = async ({ email, name, otp, expiresInMinutes }) =>
     simulationMessage: `Sent password reset OTP ${otp} to ${email} for "${name || "user"}". It expires in ${expiresInMinutes} minutes.`,
   });
 
+const sendLoginOtp = async ({ email, name, otp, expiresInMinutes }) =>
+  sendMail({
+    to: email,
+    subject: "Your SafarisCon login code",
+    text: [
+      `Hello ${name || "there"},`,
+      `Your SafarisCon login code is ${otp}.`,
+      `It expires in ${expiresInMinutes} minutes.`,
+      "If you did not try to log in, you can ignore this email.",
+    ].join("\n\n"),
+    html: otpHtml({
+      title: "Confirm your login",
+      name,
+      otp,
+      expiresInMinutes,
+      purpose: "complete your SafarisCon login",
+    }),
+    simulationMessage: `Sent login OTP ${otp} to ${email} for "${name || "user"}". It expires in ${expiresInMinutes} minutes.`,
+  });
+
 const sendServiceProviderBookingRequestEmail = async ({
   serviceProviderEmail,
   serviceProviderName,
@@ -275,4 +295,5 @@ module.exports = {
   sendBusinessApprovedEmail,
   sendEmailVerificationOtp,
   sendPasswordResetOtp,
+  sendLoginOtp,
 };

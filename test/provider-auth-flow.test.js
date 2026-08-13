@@ -7,6 +7,7 @@ const {
   completeProviderRegistration,
   verifyEmailOtp,
   login,
+  verifyLoginOtp,
 } = require("../src/controllers/authController");
 
 const response = () => ({
@@ -114,6 +115,16 @@ test("admin seller ID completes service provider onboarding and email verificati
     loginResponse
   );
   assert.equal(loginResponse.statusCode, 200);
-  assert.equal(loginResponse.body.user.role, "hotel");
-  assert.ok(loginResponse.body.token);
+  assert.equal(loginResponse.body.code, "LOGIN_OTP_REQUIRED");
+  assert.ok(storedUser.loginOtpHash);
+
+  const verifyLoginResponse = response();
+  await verifyLoginOtp(
+    { body: { email: "provider@example.com", otp: "123456" } },
+    verifyLoginResponse
+  );
+  assert.equal(verifyLoginResponse.statusCode, 200);
+  assert.equal(verifyLoginResponse.body.user.role, "hotel");
+  assert.ok(verifyLoginResponse.body.accessToken);
+  assert.equal(verifyLoginResponse.body.refreshToken, null);
 });
