@@ -19,6 +19,7 @@ const { clearCache } = require("../utils/cache");
 const { sendManualBookingApprovedEmail } = require("../utils/notify");
 const { hasCompletePayoutDetails, normalizePayoutDetails } = require("../utils/payoutDetails");
 const { normalizeCancelPolicy, cancelCommissionPercentOf } = require("../utils/cancellation");
+const { normalizeAvailabilityTable } = require("../services/automaticBookingService");
 
 const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
 const DEPOSIT_PERCENT = 30;
@@ -152,47 +153,6 @@ const sanitizeSellerBooking = (booking) => {
     delete data.bookingDetails.customerLocationDetails;
   }
   return data;
-};
-
-const normalizeAvailabilityTable = (table) => {
-  const columns = [
-    { id: "service", label: "Option name" },
-    { id: "price", label: "Price (RWF)" },
-    { id: "priceType", label: "Price type" },
-    { id: "calculationField", label: "Calculation field" },
-    { id: "durationUnit", label: "Duration unit" },
-    { id: "maximumDuration", label: "Maximum duration" },
-    { id: "availability", label: "Availability / capacity" },
-    { id: "details", label: "Details / amenities" },
-  ];
-  const allowedPriceTypes = new Set(["fixed", "per-person", "per-room", "per-night", "per-day", "per-hour", "per-item", "per-ticket", "per-package", "per-session"]);
-  const allowedCalculationFields = new Set(["people", "quantity", "duration", "package", "fixed"]);
-  const allowedDurationUnits = new Set(["minutes", "hours", "days", "nights", "same-day", "none"]);
-  const rows = (Array.isArray(table?.rows) ? table.rows : [])
-    .map((row, rowIndex) => {
-      const rawCells = row?.cells && typeof row.cells === "object" ? row.cells : {};
-      const cells = {};
-      cells.service = String(rawCells.service ?? "").trim();
-      cells.price = String(rawCells.price ?? "").replace(/[^0-9]/g, "").trim();
-      cells.priceType = allowedPriceTypes.has(rawCells.priceType) ? rawCells.priceType : "";
-      cells.calculationField = allowedCalculationFields.has(rawCells.calculationField) ? rawCells.calculationField : "";
-      cells.durationUnit = allowedDurationUnits.has(rawCells.durationUnit) ? rawCells.durationUnit : "";
-      cells.maximumDuration = Math.max(0, Number(rawCells.maximumDuration || 0));
-      cells.availability = Math.max(0, Math.floor(Number(rawCells.availability || 0)));
-      cells.details = String(rawCells.details || "").replace(/<[^>]*>/g, "").trim().slice(0, 2000);
-      return {
-        id: String(row.id || `row_${rowIndex + 1}`).replace(/[^a-zA-Z0-9_-]/g, "_"),
-        cells,
-      };
-    })
-    .filter((row) => row.cells.service && row.cells.price)
-    .slice(0, 50);
-
-  return {
-    columns,
-    rows,
-    updatedAt: new Date(),
-  };
 };
 
 const normalizeBookingForm = (form) => {

@@ -7,6 +7,10 @@ const {
   calculateDuration,
   calculateQuote,
   applyPromotionToQuote,
+  normalizeAvailabilityTable,
+  validateBookingSchedule,
+  optionRequiresTime,
+  optionRequiresEndDate,
 } = require("../src/services/automaticBookingService");
 const Hotel = require("../src/models/Hotel");
 const Booking = require("../src/models/Booking");
@@ -421,4 +425,229 @@ test("admin can enable automatic mode on a configured pending service", async (c
   assert.equal(savedBusinessUpdate.availabilityTable.rows[0].cells.priceType, "per-night");
   assert.equal(savedBusinessUpdate.availabilityTable.rows[0].cells.durationUnit, "nights");
   assert.equal(savedBusinessUpdate.availabilityTable.rows[0].cells.availability, 1);
+});
+
+test("seller availability table keeps published window, weekdays, hours, and extra cells keys", () => {
+  const table = normalizeAvailabilityTable({
+    rows: [{
+      id: "room_option",
+      cells: {
+        service: "Lake room",
+        price: "80000",
+        priceType: "per-night",
+        calculationField: "duration",
+        durationUnit: "nights",
+        maximumDuration: 14,
+        availability: 8,
+        availableFrom: "2026-08-20",
+        availableTo: "2026-12-31",
+        availableDays: "mon,tue,fri",
+        availableStartTime: "09:00",
+        availableEndTime: "17:00",
+        requiresTime: "no",
+        details: "Wi-Fi, breakfast",
+        customNote: "Lake view",
+      },
+    }],
+  });
+
+  const cells = table.rows[0].cells;
+  assert.equal(cells.availableFrom, "2026-08-20");
+  assert.equal(cells.availableTo, "2026-12-31");
+  assert.equal(cells.availableDays, "mon,tue,fri");
+  assert.equal(cells.availableStartTime, "09:00");
+  assert.equal(cells.availableEndTime, "17:00");
+  assert.equal(cells.requiresTime, "no");
+  assert.equal(cells.customNote, "Lake view");
+});
+
+test("older listings without hours keep dates required and times optional", () => {
+  const option = normalizePriceOption({
+    id: "legacy",
+    cells: { service: "Legacy stay", price: 50000, priceType: "per-night", calculationField: "duration", durationUnit: "nights", availability: 3 },
+  });
+  assert.equal(optionRequiresEndDate(option), true);
+  assert.equal(optionRequiresTime(option), false);
+
+  const missingDate = validateBookingSchedule({ option, endDate: "2026-08-22" });
+  assert.equal(missingDate.ok, false);
+  assert.match(missingDate.message, /Booking date is required/i);
+
+  const missingEnd = validateBookingSchedule({ option, startDate: "2026-08-20" });
+  assert.equal(missingEnd.ok, false);
+  assert.match(missingEnd.message, /End date is required/i);
+
+  const allDay = validateBookingSchedule({ option, startDate: "2026-08-20", endDate: "2026-08-22" });
+  assert.equal(allDay.ok, true);
+  assert.equal(allDay.startTime, "");
+  assert.equal(allDay.endTime, "");
+});
+
+test("booking schedule rejects dates outside the published window and unavailable weekdays", () => {
+  const option = normalizePriceOption({
+    id: "windowed",
+    cells: {
+      service: "Weekday stay",
+      price: 40000,
+      priceType: "per-night",
+      calculationField: "duration",
+      durationUnit: "nights",
+      availability: 2,
+      availableFrom: "2026-08-20",
+      availableTo: "2026-08-30",
+      availableDays: "mon,tue,wed,thu,fri",
+    },
+  });
+
+  const outside = validateBookingSchedule({ option, startDate: "2026-08-10", endDate: "2026-08-12" });
+  assert.equal(outside.ok, false);
+  assert.match(outside.message, /outside the option's available window/i);
+
+  const weekend = validateBookingSchedule({ option, startDate: "2026-08-22", endDate: "2026-08-23" });
+  assert.equal(weekend.ok, false);
+  assert.match(weekend.message, /not available on Saturday/i);
+
+  const weekday = validateBookingSchedule({ option, startDate: "2026-08-24", endDate: "2026-08-25" });
+  assert.equal(weekday.ok, true);
+});
+
+test("hourly options and published hours require times inside open-close window", () => {
+  const hourly = normalizePriceOption({
+    id: "session",
+    cells: {
+      service: "Studio hour",
+      price: 15000,
+      priceType: "per-hour",
+      calculationField: "duration",
+      durationUnit: "hours",
+      availability: 4,
+      availableStartTime: "09:00",
+      availableEndTime: "17:00",
+      requiresTime: "auto",
+    },
+  });
+  assert.equal(optionRequiresTime(hourly), true);
+  assert.equal(optionRequiresEndDate(hourly), false);
+
+  const missingTimes = validateBookingSchedule({ option: hourly, startDate: "2026-08-20" });
+  assert.equal(missingTimes.ok, false);
+  assert.match(missingTimes.message, /Start and end times are required/i);
+
+  const tooEarly = validateBookingSchedule({
+    option: hourly,
+    startDate: "2026-08-20",
+    startTime: "08:00",
+    endTime: "10:00",
+  });
+  assert.equal(tooEarly.ok, false);
+  assert.match(tooEarly.message, /outside opening hours/i);
+
+  const ok = validateBookingSchedule({
+    option: hourly,
+    startDate: "2026-08-20",
+    startTime: "09:00",
+    endTime: "11:00",
+  });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.endDate, "2026-08-20");
+});
+
+test("same-day options default end date to the booking date", () => {
+  const option = normalizePriceOption({
+    id: "tour",
+    cells: { service: "City tour", price: 20000, priceType: "per-person", calculationField: "people", durationUnit: "same-day", availability: 10 },
+  });
+  const result = validateBookingSchedule({ option, startDate: "2026-08-21" });
+  assert.equal(result.ok, true);
+  assert.equal(result.startDate, "2026-08-21");
+  assert.equal(result.endDate, "2026-08-21");
+});
+
+test("automatic per-night booking can be created without clock times", async (context) => {
+  const originals = {
+    readyState: SiteSetting.db._readyState,
+    settingFindOne: SiteSetting.findOne,
+    hotelFindOne: Hotel.findOne,
+    hotelCountDocuments: Hotel.countDocuments,
+    hotelFindOneAndUpdate: Hotel.findOneAndUpdate,
+    bookingCreate: Booking.create,
+    auditInsertMany: AuditLog.insertMany,
+  };
+  const business = {
+    _id: "507f1f77bcf86cd799439022",
+    type: "hotel-rooms",
+    approvalStatus: "approved",
+    status: "available",
+    bookingMode: "automatic",
+    availabilityTable: {
+      rows: [{
+        id: "room_option",
+        cells: {
+          service: "Room with all needs",
+          price: 99997,
+          priceType: "per-night",
+          calculationField: "duration",
+          durationUnit: "nights",
+          maximumDuration: 10,
+          availability: 4,
+          availableFrom: "2026-07-01",
+          availableTo: "2026-12-31",
+          requiresTime: "no",
+        },
+      }],
+    },
+  };
+  let created = null;
+
+  SiteSetting.db._readyState = 1;
+  SiteSetting.findOne = () => ({ lean: async () => ({ value: { bookingMode: "service-level" } }) });
+  Hotel.findOne = async () => business;
+  Hotel.countDocuments = async () => 1;
+  Hotel.findOneAndUpdate = async () => business;
+  Booking.create = async (data) => {
+    created = { ...data, _id: "507f1f77bcf86cd799439033" };
+    return created;
+  };
+  AuditLog.insertMany = async () => [];
+  context.after(() => {
+    SiteSetting.db._readyState = originals.readyState;
+    SiteSetting.findOne = originals.settingFindOne;
+    Hotel.findOne = originals.hotelFindOne;
+    Hotel.countDocuments = originals.hotelCountDocuments;
+    Hotel.findOneAndUpdate = originals.hotelFindOneAndUpdate;
+    Booking.create = originals.bookingCreate;
+    AuditLog.insertMany = originals.auditInsertMany;
+  });
+
+  const result = response();
+  await createBookingRequest({
+    user: { _id: "507f1f77bcf86cd799439011", role: "customer" },
+    body: {
+      hotelId: business._id,
+      destinationPlace: "Hotel room",
+      destinationLocation: "Kigali",
+      guests: 2,
+      numberOfPeople: 2,
+      quantity: 2,
+      customerLocationDetails,
+      startDate: "2026-07-10",
+      endDate: "2026-07-12",
+      bookingDetails: {
+        customerLocationDetails,
+        selectedOptionId: "room_option",
+        requestedService: "Room with all needs",
+        fullName: "Test Customer",
+        phone: "+250788000000",
+        email: "customer@example.com",
+        numberOfPeople: 2,
+        quantity: 2,
+      },
+    },
+  }, result);
+
+  assert.equal(result.statusCode, 201);
+  assert.equal(created.startTime, "");
+  assert.equal(created.endTime, "");
+  assert.equal(created.bookingDetails.startDate, "2026-07-10");
+  assert.equal(created.bookingDetails.endDate, "2026-07-12");
 });
