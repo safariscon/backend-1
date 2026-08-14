@@ -7,6 +7,7 @@ const SiteSetting = require("../models/SiteSetting");
 const { getCache, setCache } = require("../utils/cache");
 const { createPdfReceipt } = require("../utils/pdfReceipt");
 const { anonymizeBusinessList, createGuestName } = require("../utils/anonymousBusiness");
+const { buildPublicCatalogFilter, publicCatalogCacheKey } = require("../utils/serviceFilters");
 const QRCode = require("qrcode");
 const { storeBookingPdf, getBookingPdfDownloadUrl } = require("../services/bookingPdfStorage");
 
@@ -25,21 +26,11 @@ const listPublicHotels = async (req, res) => {
   try {
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(60, Math.max(1, Number(req.query.limit) || 60));
-    const cacheKey = `public:hotels:${page}:${limit}`;
+    const cacheKey = publicCatalogCacheKey(req.query, page, limit);
     const cached = getCache(cacheKey);
     if (cached) return res.json(cached);
 
-    const hotels = await Hotel.find({
-      $and: [
-        { approvalStatus: { $ne: "rejected" } },
-        {
-          $or: [
-            { approvalStatus: "approved" },
-            { approvalStatus: { $exists: false } },
-          ],
-        },
-      ],
-    })
+    const hotels = await Hotel.find(buildPublicCatalogFilter(req.query))
       .select(
         "type location locationDetails images promotion bookingRules bookingMode availabilityTable bookingForm approvalStatus status availableQuantity quantityRemaining inventoryStatus createdAt updatedAt"
       )
@@ -57,6 +48,11 @@ const listPublicHotels = async (req, res) => {
       page,
       limit,
       hasMore: anonymousHotels.length === limit,
+      filters: {
+        category: String(req.query.category || req.query.type || "").trim(),
+        location: String(req.query.location || req.query.district || req.query.province || "").trim(),
+        search: String(req.query.search || req.query.q || "").trim(),
+      },
     };
     setCache(cacheKey, payload);
     return res.json(payload);

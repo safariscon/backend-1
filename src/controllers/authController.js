@@ -17,8 +17,12 @@ const {
 } = require("../utils/auth");
 const { generateUniqueSellerId } = require("../utils/sellerIds");
 const { normalizePayoutDetails, toLocalMsisdn } = require("../utils/payoutDetails");
-const { getPlatformCommissionPercentage } = require("../utils/commission");
 const { hasAcceptedTerms, applyTermsAcceptance, termsRejectedPayload } = require("../utils/terms");
+const {
+  buildProviderInviteUrl,
+  buildOnboardingPreview,
+  normalizeSellerId,
+} = require("../utils/providerOnboarding");
 const {
   sendProviderOnboardingEmail,
   sendEmailVerificationOtp,
@@ -828,6 +832,8 @@ const registerBusinessByAdmin = async (req, res) => {
         serviceProviderName: normalizedOwnerName,
         serviceProviderEmail: normalizedEmail,
         sellerId,
+        registrationPath: "/provider-register",
+        registrationUrl: buildProviderInviteUrl({ sellerId }),
       };
 
       try {
@@ -836,6 +842,7 @@ const registerBusinessByAdmin = async (req, res) => {
           businessName: hotel.name,
           providerName: normalizedOwnerName,
           sellerId,
+          registrationUrl: onboardingCredentials.registrationUrl,
         });
         credentialEmailSent = true;
       } catch (emailError) {
@@ -871,6 +878,7 @@ const registerBusinessByAdmin = async (req, res) => {
       serviceProviderName: owner ? normalizedOwnerName : "",
       registrationPath: owner ? "/provider-register" : "",
       serviceProviderRegistrationPath: owner ? "/provider-register" : "",
+      registrationUrl: onboardingCredentials?.registrationUrl || "",
       credentials: onboardingCredentials,
       credentialEmail: {
         sent: credentialEmailSent,
@@ -889,6 +897,51 @@ const registerBusinessByAdmin = async (req, res) => {
   }
 };
 
+const getProviderOnboarding = async (req, res) => {
+  try {
+    const sellerId = normalizeSellerId(req.params.sellerId || req.query.sellerId);
+    if (!sellerId) {
+      return res.status(400).json({ message: "sellerId is required." });
+    }
+
+    const user = await User.findOne(
+      {
+        sellerId,
+        role: { $in: ["hotel", "supplier"] },
+      },
+      "name email sellerId role mustSetPassword hotelId"
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        message: "Service provider onboarding account not found. Check the seller ID in your invite email.",
+      });
+    }
+    if (!user.mustSetPassword) {
+      return res.status(409).json({
+        code: "ONBOARDING_ALREADY_COMPLETED",
+        message: "This service provider has already completed registration. Please log in.",
+      });
+    }
+
+    let businessName = "";
+    if (user.hotelId) {
+      const hotel = await Hotel.findById(user.hotelId).select("name type");
+      businessName = hotel?.name || "";
+    }
+
+    return res.json({
+      ...buildOnboardingPreview(user),
+      businessName,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to load service provider onboarding details.",
+      error: error.message,
+    });
+  }
+};
+
 const completeProviderRegistration = async (req, res) => {
   try {
     const {
@@ -900,17 +953,10 @@ const completeProviderRegistration = async (req, res) => {
       confirmPassword,
     } = req.body;
 
-    if (
-      !providerName ||
-      !providerEmail ||
-      !sellerId ||
-      !newPassword
-    ) {
-      return res
-        .status(400)
-        .json({
-          message: "Service provider name, email, seller ID, and new password are required.",
-        });
+    if (!sellerId || !newPassword) {
+      return res.status(400).json({
+        message: "Seller ID and new password are required.",
+      });
     }
 
     if (String(newPassword).length < 8) {
@@ -929,10 +975,8 @@ const completeProviderRegistration = async (req, res) => {
       );
     }
 
-    const normalizedEmail = String(providerEmail).toLowerCase().trim();
-    const normalizedSellerId = String(sellerId).toUpperCase().trim();
+    const normalizedSellerId = normalizeSellerId(sellerId);
     const user = await User.findOne({
-      email: normalizedEmail,
       sellerId: normalizedSellerId,
       role: { $in: ["hotel", "supplier"] },
       mustSetPassword: true,
@@ -944,7 +988,15 @@ const completeProviderRegistration = async (req, res) => {
       });
     }
 
-    if (user.name.trim().toLowerCase() !== String(providerName).trim().toLowerCase()) {
+    if (providerEmail) {
+      const normalizedEmail = String(providerEmail).toLowerCase().trim();
+      if (user.email !== normalizedEmail) {
+        return res.status(400).json({
+          message: "Email does not match the admin-created account. Use the email from your invite.",
+        });
+      }
+    }
+    if (providerName && user.name.trim().toLowerCase() !== String(providerName).trim().toLowerCase()) {
       return res
         .status(400)
         .json({ message: "Service provider name does not match the admin-created account." });
@@ -970,24 +1022,7 @@ const completeProviderRegistration = async (req, res) => {
       return res.status(payoutResult.status).json({ message: payoutResult.message });
     }
 
-    const businessInput =
-      (req.body.businessDetails && typeof req.body.businessDetails === "object" && req.body.businessDetails) ||
-      (req.body.business && typeof req.body.business === "object" && req.body.business) ||
-      {};
-    const businessName = String(businessInput.businessName || req.body.businessName || "").trim();
-    const businessType = String(businessInput.businessType || req.body.businessType || "other").trim() || "other";
-    const description = String(businessInput.description || req.body.description || "").trim();
-    const location = String(businessInput.location || req.body.location || "").trim();
-    const contactInfo = String(businessInput.contactInfo || req.body.contactInfo || "").trim();
-    const basePrice = Number(businessInput.basePrice || req.body.basePrice || 0);
-    const phone = toLocalMsisdn(req.body.phone || businessInput.phone || "");
-
-    let business = user.hotelId ? await Hotel.findById(user.hotelId) : null;
-    if (!business && !businessName) {
-      return res.status(400).json({
-        message: "Business name and payout details are required so this provider can receive booking payments.",
-      });
-    }
+    const phone = toLocalMsisdn(req.body.phone || "");
 
     user.password = await bcrypt.hash(String(newPassword), 12);
     user.mustSetPassword = false;
@@ -1001,14 +1036,11 @@ const completeProviderRegistration = async (req, res) => {
     if (phone) user.phone = phone;
     await user.save();
 
+    // Completing registration must not create a listing. Listings are created later
+    // via POST /api/hotel/services. If admin already attached a business, only sync payout.
+    const business = user.hotelId ? await Hotel.findById(user.hotelId) : null;
     if (business) {
       business.payoutDetails = payoutResult.value;
-      if (businessName) business.name = businessName;
-      if (businessType) business.type = businessType;
-      if (description) business.description = description;
-      if (location) business.location = location;
-      if (contactInfo) business.contactInfo = contactInfo;
-      if (Number.isFinite(basePrice) && basePrice > 0) business.basePrice = basePrice;
       if (phone) {
         business.contactDetails = {
           ...(business.contactDetails || {}),
@@ -1016,28 +1048,6 @@ const completeProviderRegistration = async (req, res) => {
         };
       }
       await business.save();
-    } else {
-      business = await Hotel.create({
-        name: businessName,
-        type: businessType,
-        location: location || "Rwanda",
-        description,
-        basePrice: Number.isFinite(basePrice) ? Math.max(0, basePrice) : 0,
-        contactInfo: contactInfo || user.email,
-        contactDetails: {
-          email: user.email,
-          phone: phone || "",
-        },
-        payoutDetails: payoutResult.value,
-        ownerEmail: user.email,
-        sellerContactEmail: user.email,
-        ownerUserId: user._id,
-        approvalStatus: "draft",
-        status: "unavailable",
-        commissionPercentage: getPlatformCommissionPercentage(),
-      });
-      user.hotelId = business._id;
-      await user.save();
     }
 
     let emailVerificationSent = false;
@@ -1052,15 +1062,19 @@ const completeProviderRegistration = async (req, res) => {
     return res.json({
       user: await buildAuthUserPayload(user),
       token,
-      business: {
-        id: business._id,
-        name: business.name,
-        type: business.type,
-        approvalStatus: business.approvalStatus,
-        payoutDetails: business.payoutDetails,
-      },
+      business: business
+        ? {
+            id: business._id,
+            name: business.name,
+            type: business.type,
+            approvalStatus: business.approvalStatus,
+            payoutDetails: business.payoutDetails,
+          }
+        : null,
       payoutDetails: payoutResult.value,
-      message: "Service provider registration completed. Verify your email before logging in.",
+      message: business
+        ? "Service provider registration completed. Verify your email before logging in."
+        : "Service provider registration completed. Verify your email before logging in. Create a service listing from your dashboard when you are ready.",
       emailVerification: {
         required: true,
         sent: emailVerificationSent,
@@ -1256,6 +1270,7 @@ module.exports = {
   logout,
   registerTourist,
   registerBusinessByAdmin,
+  getProviderOnboarding,
   completeProviderRegistration,
   resendVerificationOtp,
   verifyEmailOtp,

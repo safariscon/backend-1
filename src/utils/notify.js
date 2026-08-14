@@ -99,8 +99,21 @@ const sendProviderOnboardingEmail = async ({
   businessName,
   providerName,
   sellerId,
-}) =>
-  sendMail({
+  registrationUrl,
+}) => {
+  const inviteUrl = String(registrationUrl || "").trim();
+  const nameLine = `Name: ${providerName || "service provider"}`;
+  const emailLine = `Email: ${providerEmail}`;
+  const idLine = `Seller ID: ${sellerId}`;
+  const linkLines = inviteUrl
+    ? [
+        "Open this link to finish registration. Your name and email will be filled in automatically:",
+        inviteUrl,
+        "On that page, confirm your seller ID and create a password. You do not need to retype your name or email.",
+      ]
+    : ["Use this seller ID to complete registration and create your password."];
+
+  return sendMail({
     to: providerEmail,
     subject: "Complete your SafarisCon service provider registration",
     text: [
@@ -108,8 +121,10 @@ const sendProviderOnboardingEmail = async ({
       businessName
         ? `Your service provider account for ${businessName} has been created.`
         : "Your service provider account has been created.",
-      "Use this seller ID to complete registration and create your password:",
-      `Seller ID: ${sellerId}`,
+      nameLine,
+      emailLine,
+      idLine,
+      ...linkLines,
       "After creating your password, you will receive an email verification code before you can log in.",
     ].join("\n\n"),
     html: `
@@ -120,16 +135,32 @@ const sendProviderOnboardingEmail = async ({
           businessName
             ? `Your service provider account for ${businessName} has been created.`
             : "Your service provider account has been created.",
-          "Use this seller ID to complete registration and create your password:",
+          "These details are already saved for you. You will not need to retype your name or email.",
         ])}
         <div style="background:#f3f4f6;border-radius:8px;padding:16px;margin:16px 0;color:#111827;">
+          <p style="margin:0 0 8px;"><strong>Name:</strong> ${escapeHtml(providerName)}</p>
+          <p style="margin:0 0 8px;"><strong>Email:</strong> ${escapeHtml(providerEmail)}</p>
           <p style="margin:0;"><strong>Seller ID:</strong> ${escapeHtml(sellerId)}</p>
         </div>
+        ${
+          inviteUrl
+            ? `
+        <p style="margin:0 0 16px;color:#1f2937;line-height:1.5;">Open the link below. The form will load your name and email automatically. Enter your seller ID and a new password to continue.</p>
+        <p style="margin:0 0 20px;">
+          <a href="${escapeHtml(inviteUrl)}" style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:600;">
+            Complete registration
+          </a>
+        </p>
+        <p style="margin:0 0 16px;color:#6b7280;font-size:13px;line-height:1.5;word-break:break-all;">${escapeHtml(inviteUrl)}</p>
+            `
+            : paragraphHtml(["Use this seller ID to complete registration and create your password."])
+        }
         ${paragraphHtml(["After creating your password, you will receive an email verification code before you can log in."])}
       </div>
     `,
-    simulationMessage: `Sent service provider onboarding email with seller ID ${sellerId} to ${providerEmail} for business "${businessName || "service provider account"}" and service provider "${providerName}".`,
+    simulationMessage: `Sent service provider onboarding email with seller ID ${sellerId} and invite ${inviteUrl || "(no link)"} to ${providerEmail} for business "${businessName || "service provider account"}" and service provider "${providerName}".`,
   });
+};
 
 const sendEmailVerificationOtp = async ({ email, name, otp, expiresInMinutes }) =>
   sendMail({

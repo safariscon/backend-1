@@ -12,6 +12,9 @@ const { registerBusinessByAdmin } = require("./authController");
 const { prefixedCode, secureToken } = require("../utils/secureIds");
 const { generateUniqueSellerId } = require("../utils/sellerIds");
 const { sendProviderOnboardingEmail, sendBusinessApprovedEmail } = require("../utils/notify");
+const { buildProviderInviteUrl, normalizeSellerId } = require("../utils/providerOnboarding");
+const { buildAdminServiceFilter } = require("../utils/serviceFilters");
+const mongoose = require("mongoose");
 const {
   REALTIME_EVENTS,
   emitHotelRealtime,
@@ -48,6 +51,7 @@ const createSeller = async (req, res) => {
       mustSetPassword: true,
     });
 
+    const registrationUrl = buildProviderInviteUrl({ sellerId });
     let credentialEmailSent = false;
     let credentialEmailWarning = "";
     try {
@@ -55,6 +59,7 @@ const createSeller = async (req, res) => {
         providerEmail: email,
         providerName: name,
         sellerId,
+        registrationUrl,
       });
       credentialEmailSent = true;
     } catch (emailError) {
@@ -77,6 +82,8 @@ const createSeller = async (req, res) => {
         serviceProviderName: name,
         serviceProviderEmail: email,
         sellerId,
+        registrationPath: "/provider-register",
+        registrationUrl,
       },
       credentialEmail: {
         sent: credentialEmailSent,
@@ -88,12 +95,62 @@ const createSeller = async (req, res) => {
   }
 };
 
-const listServices = async (_req, res) => {
+const isObjectId = (value) =>
+  mongoose.Types.ObjectId.isValid(value) && String(new mongoose.Types.ObjectId(value)) === String(value);
+
+const resolveProviderOwnerId = async (query = {}) => {
+  const rawProvider = String(query.providerId || query.ownerUserId || query.userId || query.provider || "").trim();
+  const sellerId = normalizeSellerId(query.sellerId || query.providerSellerId || "");
+  const providerEmail = String(query.providerEmail || "").trim().toLowerCase();
+  const looksLikeSellerId = /^SP\d+$/i.test(rawProvider);
+
+  if (isObjectId(rawProvider) && !looksLikeSellerId) {
+    return { ownerUserId: rawProvider, applied: true };
+  }
+
+  const resolvedSellerId = sellerId || (looksLikeSellerId ? normalizeSellerId(rawProvider) : "");
+  if (resolvedSellerId || providerEmail) {
+    const owner = await User.findOne({
+      role: { $in: ["hotel", "supplier"] },
+      ...(resolvedSellerId ? { sellerId: resolvedSellerId } : {}),
+      ...(providerEmail ? { email: providerEmail } : {}),
+    }).select("_id name email sellerId");
+    if (!owner) return { ownerUserId: null, applied: true, missing: true };
+    return { ownerUserId: owner._id, applied: true };
+  }
+
+  return { ownerUserId: null, applied: false };
+};
+
+const listServices = async (req, res) => {
   try {
-    const services = await Hotel.find({})
+    const provider = await resolveProviderOwnerId(req.query);
+    if (provider.missing) {
+      const providers = await User.find({ role: { $in: ["hotel", "supplier"] } })
+        .select("name email sellerId")
+        .sort({ name: 1 })
+        .lean();
+      return res.json({
+        services: [],
+        providers,
+        filters: {
+          providerId: req.query.providerId || req.query.ownerUserId || req.query.provider || "",
+          sellerId: req.query.sellerId || "",
+        },
+      });
+    }
+
+    const filter = buildAdminServiceFilter(req.query, provider.ownerUserId);
+    const services = await Hotel.find(filter)
       .populate("ownerUserId", "name email sellerId")
       .sort({ createdAt: -1 })
       .lean();
+
+    const providers = await User.find({ role: { $in: ["hotel", "supplier"] } })
+      .select("name email sellerId")
+      .sort({ name: 1 })
+      .lean();
+
     return res.json({
       services: services.map((business) => ({
         ...business,
@@ -102,7 +159,24 @@ const listServices = async (_req, res) => {
         businessId: business,
         availableQuantity: business.quantityRemaining ?? business.availableQuantity ?? 0,
         verificationStatus: business.approvalStatus,
+        provider: business.ownerUserId
+          ? {
+              id: business.ownerUserId._id,
+              name: business.ownerUserId.name,
+              email: business.ownerUserId.email,
+              sellerId: business.ownerUserId.sellerId,
+            }
+          : null,
       })),
+      providers,
+      filters: {
+        providerId: provider.applied ? String(provider.ownerUserId || "") : "",
+        sellerId: String(req.query.sellerId || "").trim(),
+        category: String(req.query.category || req.query.type || "").trim(),
+        location: String(req.query.location || "").trim(),
+        search: String(req.query.search || req.query.q || "").trim(),
+        approvalStatus: String(req.query.approvalStatus || "").trim(),
+      },
     });
   } catch (error) {
     return res.status(500).json({ message: "Failed to fetch services.", error: error.message });
