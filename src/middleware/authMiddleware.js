@@ -1,37 +1,70 @@
-const jwt = require("jsonwebtoken");
 const User = require("../models/User");
+const { isAccessTokenPayload, verifyAuthToken } = require("../utils/auth");
+const { hasUserAcceptedTerms, termsRejectedPayload } = require("../utils/terms");
 
-const protect = async (req, res, next) => {
-  try {
-    const authHeader = req.headers.authorization || "";
-    const token = authHeader.startsWith("Bearer ")
-      ? authHeader.split(" ")[1]
-      : null;
+const loadAccessUser = async (req) => {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ")
+    ? authHeader.split(" ")[1]
+    : null;
 
-    if (!token) {
-      return res.status(401).json({ message: "Unauthorized: token missing." });
-    }
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id).select("-password");
-
-    if (!user) {
-      return res.status(401).json({ message: "Unauthorized: user not found." });
-    }
-
-    req.user = user;
-    next();
-  } catch (error) {
-    return res.status(401).json({ message: "Unauthorized: invalid token." });
+  if (!token) {
+    return { status: 401, body: { message: "Unauthorized: token missing." } };
   }
+
+  let decoded;
+  try {
+    decoded = verifyAuthToken(token);
+  } catch (_error) {
+    return { status: 401, body: { message: "Unauthorized: invalid token." } };
+  }
+
+  if (!isAccessTokenPayload(decoded)) {
+    return { status: 401, body: { message: "Unauthorized: access token required." } };
+  }
+
+  const user = await User.findById(decoded.id).select("-password");
+  if (!user) {
+    return { status: 401, body: { message: "Unauthorized: user not found." } };
+  }
+
+  return { user };
 };
+
+const createProtect =
+  ({ requireTerms = true } = {}) =>
+  async (req, res, next) => {
+    try {
+      const result = await loadAccessUser(req);
+      if (!result.user) {
+        return res.status(result.status).json(result.body);
+      }
+
+      if (requireTerms && result.user.role !== "admin" && !hasUserAcceptedTerms(result.user)) {
+        return res.status(403).json(
+          termsRejectedPayload(
+            "You must accept the Terms of use and Privacy policy before you can use SafarisCon."
+          )
+        );
+      }
+
+      req.user = result.user;
+      next();
+    } catch (_error) {
+      return res.status(401).json({ message: "Unauthorized: invalid token." });
+    }
+  };
+
+const protect = createProtect({ requireTerms: true });
+const protectAllowWithoutTerms = createProtect({ requireTerms: false });
 
 const optionalProtect = async (req, _res, next) => {
   try {
     const authHeader = req.headers.authorization || "";
     const token = authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
     if (!token) return next();
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = verifyAuthToken(token);
+    if (!isAccessTokenPayload(decoded)) return next();
     req.user = await User.findById(decoded.id).select("-password");
     return next();
   } catch (_error) {
@@ -67,4 +100,12 @@ const supplierOnly = (req, res, next) => {
   next();
 };
 
-module.exports = { protect, optionalProtect, adminOnly, customerOnly, sellerOnly, supplierOnly };
+module.exports = {
+  protect,
+  protectAllowWithoutTerms,
+  optionalProtect,
+  adminOnly,
+  customerOnly,
+  sellerOnly,
+  supplierOnly,
+};

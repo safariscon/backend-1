@@ -14,6 +14,7 @@ const {
   forgotPassword,
   resetPassword,
   login,
+  verifyLoginOtp,
 } = require("../src/controllers/authController");
 
 const response = () => ({
@@ -57,13 +58,14 @@ test("customer registration sends verification OTP and OTP can verify email", as
 
   const registerResponse = response();
   await registerTourist(
-    { body: { name: "Demo Customer", email: "Customer@Example.com", password: "Password123!", role: "customer" } },
+    { body: { name: "Demo Customer", email: "Customer@Example.com", password: "Password123!", role: "customer", acceptedTerms: true } },
     registerResponse
   );
 
   assert.equal(registerResponse.statusCode, 201);
   assert.equal(registerResponse.body.user.email, "customer@example.com");
   assert.equal(registerResponse.body.user.emailVerified, false);
+  assert.equal(registerResponse.body.user.termsAccepted, true);
   assert.equal(registerResponse.body.emailVerification.sent, true);
   assert.ok(storedUser.emailVerificationOtpHash);
 
@@ -90,7 +92,21 @@ test("customer registration sends verification OTP and OTP can verify email", as
   );
 
   assert.equal(loginResponse.statusCode, 200);
-  assert.ok(loginResponse.body.token);
+  assert.equal(loginResponse.body.code, "LOGIN_OTP_REQUIRED");
+  assert.equal(loginResponse.body.refreshToken, undefined);
+  assert.ok(storedUser.loginOtpHash);
+
+  const verifyLoginResponse = response();
+  await verifyLoginOtp(
+    { body: { email: "customer@example.com", otp: "123456" } },
+    verifyLoginResponse
+  );
+
+  assert.equal(verifyLoginResponse.statusCode, 200);
+  assert.ok(verifyLoginResponse.body.accessToken);
+  assert.equal(verifyLoginResponse.body.token, verifyLoginResponse.body.accessToken);
+  assert.equal(verifyLoginResponse.body.refreshToken, null);
+  assert.equal(verifyLoginResponse.body.rememberMe, false);
 });
 
 test("forgot password issues OTP and reset password updates login credentials", async (context) => {
@@ -140,7 +156,18 @@ test("forgot password issues OTP and reset password updates login credentials", 
   await login({ body: { email: "reset@example.com", password: newPassword } }, loginResponse);
 
   assert.equal(loginResponse.statusCode, 200);
-  assert.ok(loginResponse.body.token);
+  assert.equal(loginResponse.body.code, "LOGIN_OTP_REQUIRED");
+  assert.ok(storedUser.loginOtpHash);
+
+  const verifyLoginResponse = response();
+  await verifyLoginOtp(
+    { body: { email: "reset@example.com", otp: "654321" } },
+    verifyLoginResponse
+  );
+
+  assert.equal(verifyLoginResponse.statusCode, 200);
+  assert.ok(verifyLoginResponse.body.accessToken);
+  assert.equal(verifyLoginResponse.body.refreshToken, null);
 });
 
 test("login blocks every unverified role after valid password", async (context) => {

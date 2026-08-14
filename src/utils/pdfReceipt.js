@@ -101,7 +101,7 @@ const createPdfReceipt = async ({ booking, business, transaction, verifyUrl }) =
 
     doc.fillColor(INK).font("Helvetica-Bold").fontSize(10).text("Terms & Conditions", 42, 720);
     doc.fillColor(MUTED).font("Helvetica").fontSize(8.5).text(
-      "This booking is valid after the 30% deposit and successful QR verification. Present this document when receiving the service. The remaining balance follows the provider agreement and SafarisCon booking rules.",
+      "This booking is valid after full payment and successful QR verification. Present this document when receiving the service.",
       42, 737, { width: 528, lineGap: 3 }
     );
     doc.moveTo(42, 790).lineTo(570, 790).strokeColor(LINE).stroke();

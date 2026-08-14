@@ -121,7 +121,7 @@ const listHotelServices = async (req, res) => {
           hotelId: service.hotelId,
           category: service.category,
           name: createGuestName(service.category, position),
-          description: "Provider identity and exact details unlock after the confirmed 30% deposit.",
+          description: "Provider identity and exact details unlock after full payment.",
           priceModel: service.priceModel,
           availabilitySchedule: service.availabilitySchedule,
           bookingIntegration: service.bookingIntegration,

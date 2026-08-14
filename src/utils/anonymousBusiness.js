@@ -62,7 +62,7 @@ const anonymizeBusiness = (business, guestName) => ({
   category: business.type || "service",
   location: business.locationDetails?.district || getDestinationRegion(business.location),
   destinationLocation: business.locationDetails?.district || getDestinationRegion(business.location),
-  description: `Book this verified ${getGuestCategoryLabel(business.type).toLowerCase()} securely. Provider identity and exact details unlock after the confirmed 30% deposit.`,
+  description: `Book this verified ${getGuestCategoryLabel(business.type).toLowerCase()} securely. Provider identity and exact details unlock after full payment.`,
   basePrice: 0,
   priceText: "",
   images: Array.isArray(business.images) ? business.images.filter(Boolean) : [],

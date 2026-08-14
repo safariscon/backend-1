@@ -378,6 +378,23 @@ const bookingSchema = new mongoose.Schema(
         default: "moderate",
         trim: true,
       },
+      windowHours: {
+        type: Number,
+        default: 6,
+        min: 0,
+      },
+      penaltyPercent: {
+        type: Number,
+        default: 20,
+        min: 0,
+        max: 100,
+      },
+      cancelCommissionPercent: {
+        type: Number,
+        default: 0,
+        min: 0,
+        max: 100,
+      },
       refundableUntil: {
         type: Date,
         default: null,
@@ -387,6 +404,21 @@ const bookingSchema = new mongoose.Schema(
         default: null,
       },
       refundAmount: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      penaltyAmount: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      platformCancelAmount: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      providerCancelAmount: {
         type: Number,
         default: 0,
         min: 0,

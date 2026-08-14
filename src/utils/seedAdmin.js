@@ -38,7 +38,16 @@ const seedAdmin = async () => {
     passwordResetOtpExpiresAt: null,
     passwordResetOtpAttempts: 0,
     passwordResetOtpSentAt: null,
+    loginOtpHash: "",
+    loginOtpExpiresAt: null,
+    loginOtpAttempts: 0,
+    loginOtpSentAt: null,
+    loginRememberMe: false,
+    refreshTokenHash: "",
+    refreshTokenExpiresAt: null,
     passwordChangedAt: new Date(),
+    termsAccepted: true,
+    termsAcceptedAt: existing?.termsAcceptedAt || verifiedAt,
   };
 
   if (!existing) {
@@ -78,6 +87,8 @@ const seedAdmin = async () => {
     await User.create({
       ...helper,
       password: hashedPassword,
+      termsAccepted: true,
+      termsAcceptedAt: new Date(),
     });
   }
 };

@@ -71,11 +71,13 @@ test("customer booking details are locked before 30% payment", async (context) =
 });
 
 test("details unlock after successful 30% payment", async (context) => {
+  process.env.XENTRIPAY_SIMULATE_SUCCESS = "true";
   const originals = {
     bookingFindOne: Booking.findOne,
     bookingFindOneAndUpdate: Booking.findOneAndUpdate,
     hotelFindById: Hotel.findById,
     transactionCreate: Transaction.create,
+    transactionFindOne: Transaction.findOne,
   };
   const booking = makeBookingDoc({
     _id: "507f1f77bcf86cd799439033",
@@ -87,6 +89,7 @@ test("details unlock after successful 30% payment", async (context) => {
     depositAmount: 30000,
     depositPercent: 30,
     depositPercentage: 30,
+    commissionPercentage: 12,
     hotelId: "507f1f77bcf86cd799439022",
     preferredHotelId: "507f1f77bcf86cd799439022",
     bookingCode: "SCN-TEST",
@@ -95,7 +98,21 @@ test("details unlock after successful 30% payment", async (context) => {
     receipt: {},
   });
   const paidBooking = makeBookingDoc({ ...booking });
-  const business = { _id: booking.hotelId, ownerUserId: "seller", payoutDetails: {}, sellerContactEmail: "seller@example.com" };
+  const business = {
+    _id: booking.hotelId,
+    ownerUserId: "seller",
+    sellerContactEmail: "seller@example.com",
+    commissionPercentage: 12,
+    payoutDetails: {
+      method: "momo",
+      providerId: "63510",
+      providerName: "MTN MOBILE MONEY",
+      accountName: "Demo Lodge",
+      accountNumber: "0788302208",
+      msisdn: "0788302208",
+    },
+    async save() { return this; },
+  };
 
   Booking.findOne = () => ({ populate: async () => booking });
   Booking.findOneAndUpdate = (_filter, update) => ({
@@ -105,19 +122,27 @@ test("details unlock after successful 30% payment", async (context) => {
     },
   });
   Hotel.findById = async () => business;
-  Transaction.create = async (data) => ({ ...data, _id: "transaction" });
+  Transaction.findOne = () => ({ sort: async () => null });
+  Transaction.create = async (data) => ({ ...data, _id: "transaction", async save() { return this; } });
   context.after(() => {
     Booking.findOne = originals.bookingFindOne;
     Booking.findOneAndUpdate = originals.bookingFindOneAndUpdate;
     Hotel.findById = originals.hotelFindById;
     Transaction.create = originals.transactionCreate;
+    Transaction.findOne = originals.transactionFindOne;
+    delete process.env.XENTRIPAY_SIMULATE_SUCCESS;
   });
 
   const result = response();
   await payBooking({
     params: { bookingId: booking._id },
-    body: { paymentMethod: "mobile-money", senderAccount: "+250788000000" },
-    user: { _id: booking.touristId, email: "customer@example.com", role: "customer" },
+    body: {
+      paymentMethod: "momo",
+      email: "customer@example.com",
+      cname: "Demo Customer",
+      cnumber: "0780371519",
+    },
+    user: { _id: booking.touristId, email: "customer@example.com", name: "Demo Customer", role: "customer" },
     headers: {},
   }, result);
 
@@ -125,6 +150,8 @@ test("details unlock after successful 30% payment", async (context) => {
   assert.equal(result.body.booking.paymentStatus, "deposit_paid");
   assert.equal(result.body.booking.detailsUnlocked, true);
   assert.equal(result.body.booking.amountPaid, 30000);
+  assert.equal(result.body.split.platformAmount, 3600);
+  assert.equal(result.body.split.providerAmount, 26400);
   assert.equal(hasDepositPaid(result.body.booking), true);
 });
 

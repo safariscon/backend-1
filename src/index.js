@@ -26,7 +26,7 @@ const seedAdmin = require("./utils/seedAdmin");
 const { initRealtime } = require("./utils/realtime");
 const { setDbReady } = require("./middleware/databaseMiddleware");
 const { runRebookExpiryCleanup } = require("./controllers/rebookController");
-const { runBookingNoActionRefundCleanup } = require("./controllers/bookingController");
+const { runBookingNoActionRefundCleanup, runPendingPaymentSync, runReleasedProviderPayouts } = require("./controllers/bookingController");
 
 const PORT = process.env.PORT || 5000;
 const REBOOK_EXPIRY_INTERVAL_MS = 5 * 60 * 1000;
@@ -61,6 +61,12 @@ const startRebookExpiryCleanup = () => {
     try {
       logRebookExpirySummary(await runRebookExpiryCleanup());
       logBookingRefundSummary(await runBookingNoActionRefundCleanup());
+      await runPendingPaymentSync();
+      try {
+        await runReleasedProviderPayouts();
+      } catch (payoutError) {
+        console.warn("Held provider payout job failed:", payoutError.message);
+      }
     } catch (error) {
       console.warn("Re-book cleanup failed:", error.message);
     } finally {

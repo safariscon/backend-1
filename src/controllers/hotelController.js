@@ -17,6 +17,8 @@ const {
 } = require("../services/marketplaceService");
 const { clearCache } = require("../utils/cache");
 const { sendManualBookingApprovedEmail } = require("../utils/notify");
+const { hasCompletePayoutDetails, normalizePayoutDetails } = require("../utils/payoutDetails");
+const { normalizeCancelPolicy, cancelCommissionPercentOf } = require("../utils/cancellation");
 
 const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
 const DEPOSIT_PERCENT = 30;
@@ -30,13 +32,22 @@ const withCommissionTerms = (business) => {
   if (!business) return business;
   const data = typeof business.toObject === "function" ? business.toObject() : { ...business };
   const percentage = Number(data.commissionPercentage ?? 5);
+  const cancelPolicy = normalizeCancelPolicy(data);
   return {
     ...data,
     commissionPercentage: percentage,
+    cancelWindowHours: cancelPolicy.windowHours,
+    cancelPenaltyPercent: cancelPolicy.penaltyPercent,
     commissionTerms: {
       percentage,
       label: `${percentage}% platform commission`,
-      description: "SafarisCon takes this commission from paid bookings for this business.",
+      description: "SafarisCon takes this commission from the full paid booking after the cancellation window closes. If the customer cancels in time, commission is half that rate on the cancellation fee only.",
+    },
+    cancellationTerms: {
+      windowHours: cancelPolicy.windowHours,
+      penaltyPercent: cancelPolicy.penaltyPercent,
+      cancelCommissionPercent: cancelCommissionPercentOf(percentage),
+      description: `Customers may cancel until ${cancelPolicy.windowHours} hours before the service. They lose ${cancelPolicy.penaltyPercent}% of what they paid. SafarisCon keeps ${cancelCommissionPercentOf(percentage)}% of that fee; the rest goes to you.`,
     },
   };
 };
@@ -103,8 +114,7 @@ const serviceLocationHasCoordinates = (serviceLocation) =>
 
 const getRemainingAmount = (booking) => {
   const finalPrice = Number(booking.priceSnapshot?.finalPrice || booking.totalPrice || 0);
-  const deposit = Number(booking.depositAmount || booking.amountPaid || Math.round(finalPrice * 0.3));
-  return Math.max(0, Math.round(finalPrice - deposit));
+  return Math.max(0, Math.round(finalPrice - Number(booking.amountPaid || booking.depositAmount || finalPrice)));
 };
 
 const buildCompletionSummary = (booking) => ({
@@ -262,6 +272,16 @@ const getMyHotelOverview = async (req, res) => {
         Transaction.find({ businessId: { $in: businessIds } }).lean(),
       ]);
 
+    const paid = transactions.filter((tx) => tx.status === "paid");
+    const paidEarnings = paid.reduce((sum, tx) => sum + Number(tx.sellerEarnings || tx.providerAmount || 0), 0);
+    const commission = paid.reduce((sum, tx) => sum + Number(tx.platformAmount || tx.commissionAmount || 0), 0);
+    const paidOut = paid
+      .filter((tx) => tx.payoutStatus === "successful")
+      .reduce((sum, tx) => sum + Number(tx.providerAmount || tx.sellerEarnings || 0), 0);
+    const pendingPayout = paid
+      .filter((tx) => ["none", "pending", "held"].includes(tx.payoutStatus))
+      .reduce((sum, tx) => sum + Number(tx.providerAmount || tx.sellerEarnings || 0), 0);
+
     return res.json({
       hotel: withCommissionTerms(primaryBusiness),
       business: withCommissionTerms(primaryBusiness),
@@ -272,9 +292,10 @@ const getMyHotelOverview = async (req, res) => {
         occupiedRooms,
         bookings,
         services: totalServices + businesses.length,
-        earnings: transactions
-          .filter((tx) => tx.status === "paid")
-          .reduce((sum, tx) => sum + Number(tx.sellerEarnings || 0), 0),
+        earnings: paidEarnings,
+        commission,
+        pendingPayout,
+        paidOut,
       },
     });
   } catch (error) {
@@ -671,7 +692,7 @@ const verifyBookingCodeForCompletion = async (req, res) => {
 
     if (!booking) return res.status(404).json({ message: "Booking Code is invalid for your business." });
     if (!DEPOSIT_PAID_STATUSES.includes(booking.paymentStatus) || booking.detailsUnlocked !== true) {
-      return res.status(409).json({ message: "This booking is not eligible. The 30% deposit must be paid first." });
+      return res.status(409).json({ message: "This booking is not eligible. The full amount must be paid first." });
     }
     if (["cancelled", "rejected", "completed"].includes(booking.status) || booking.completionStatus === "completed") {
       return res.status(409).json({ message: "This booking cannot be completed in its current status." });
@@ -730,8 +751,8 @@ const completeVerifiedBooking = async (req, res) => {
           status: "completed",
           paymentStatus: "completed",
           completionStatus: "completed",
-          remainingPaymentStatus: "paid_to_seller",
-          remainingAmount,
+          remainingPaymentStatus: "not_required",
+          remainingAmount: 0,
           remainingBalance: 0,
           bookingCodeUsed: true,
           bookingCodeUsedAt: now,
@@ -741,7 +762,7 @@ const completeVerifiedBooking = async (req, res) => {
         $push: {
           completionAuditLogs: {
             event: "booking_completed",
-            message: "Seller verified Booking Code and confirmed remaining 70% paid.",
+            message: "Seller verified Booking Code. Full amount was already paid in the app.",
             actorId: req.user._id,
             actorRole: req.user.role,
             at: now,
@@ -831,15 +852,17 @@ const upsertMyService = async (req, res) => {
       serviceLocation.province,
       "Rwanda",
     ].filter(Boolean).join(", ");
-    const payoutDetails = {
-      method: String(req.body.payoutDetails?.method || "mobile-money").trim(),
-      accountName: String(req.body.payoutDetails?.accountName || "").trim(),
-      accountNumber: String(req.body.payoutDetails?.accountNumber || "").trim(),
-      instructions: String(req.body.payoutDetails?.instructions || "").trim(),
-    };
-    if (!payoutDetails.accountName || !payoutDetails.accountNumber) {
-      return res.status(400).json({ message: "Payout account name and phone/account number are required." });
+    const registeredPayout = hasCompletePayoutDetails(req.user.payoutDetails)
+      ? normalizePayoutDetails(req.user.payoutDetails)
+      : { ok: false };
+    if (!registeredPayout.ok) {
+      return res.status(409).json({
+        code: "PAYOUT_DETAILS_REQUIRED",
+        message:
+          "Payout details are taken from provider registration and are not collected on the service form. Complete registration with Mobile Money or bank details first.",
+      });
     }
+    const payoutDetails = registeredPayout.value;
     const normalizedStatus = hasExactCoordinates && req.body.status !== "unavailable" ? "available" : "unavailable";
     const availabilityTable = normalizeAvailabilityTable(req.body.availabilityTable);
     if (!availabilityTable.rows.length) {
@@ -885,6 +908,7 @@ const upsertMyService = async (req, res) => {
       return res.status(400).json({ message: "Enter valid Re-book deadline hours." });
     }
     const rebookSettings = { requestDeadlineHours, rebookIdValidityHours };
+    const cancelPolicy = normalizeCancelPolicy(req.body.cancellationPolicy || req.body);
     const inventoryStatus = resolveInventoryStatus({
       status: normalizedStatus,
       quantity,
@@ -928,6 +952,10 @@ const upsertMyService = async (req, res) => {
             images,
             promotion,
             rebookSettings,
+            cancelWindowHours: cancelPolicy.windowHours,
+            cancelPenaltyPercent: cancelPolicy.penaltyPercent,
+            "bookingRules.cancellationPolicy.windowHours": cancelPolicy.windowHours,
+            "bookingRules.cancellationPolicy.penaltyPercent": cancelPolicy.penaltyPercent,
             ...(req.body.contactDetails && typeof req.body.contactDetails === "object"
               ? {
                   "contactDetails.phone": String(req.body.contactDetails.phone || "").trim(),
@@ -994,6 +1022,15 @@ const upsertMyService = async (req, res) => {
       images,
       promotion,
       rebookSettings,
+      cancelWindowHours: cancelPolicy.windowHours,
+      cancelPenaltyPercent: cancelPolicy.penaltyPercent,
+      bookingRules: {
+        cancellationPolicy: {
+          type: "moderate",
+          windowHours: cancelPolicy.windowHours,
+          penaltyPercent: cancelPolicy.penaltyPercent,
+        },
+      },
       promotionHistory: promotion.enabled ? [{ ...promotion, recordedAt: new Date() }] : [],
       services: [String(category).trim()],
       ownerEmail: `${req.user.sellerId || req.user._id}-${Date.now()}@seller.local`.toLowerCase(),

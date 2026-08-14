@@ -3,6 +3,7 @@ const {
   createBookingRequest,
   listMyBookings,
   payBooking,
+  syncBookingPayment,
   cancelBooking,
   downloadReceipt,
 } = require("../controllers/bookingController");
@@ -13,6 +14,8 @@ const router = express.Router();
 router.post("/request", protect, customerOnly, createBookingRequest);
 router.get("/my", protect, customerOnly, listMyBookings);
 router.post("/:bookingId/pay", protect, customerOnly, payBooking);
+router.get("/:bookingId/payment-status", protect, customerOnly, syncBookingPayment);
+router.post("/:bookingId/payment-status", protect, customerOnly, syncBookingPayment);
 router.post("/:bookingId/cancel", protect, customerOnly, cancelBooking);
 router.get("/:bookingId/receipt", protect, customerOnly, downloadReceipt);
 

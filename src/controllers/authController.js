@@ -4,12 +4,26 @@ const User = require("../models/User");
 const Hotel = require("../models/Hotel");
 const Room = require("../models/Room");
 const Supplier = require("../models/Supplier");
-const { generateToken, buildUserPayload } = require("../utils/auth");
+const {
+  ACCESS_TOKEN_TTL_SECONDS,
+  REFRESH_TOKEN_TTL_SECONDS,
+  generateAccessToken,
+  generateRefreshToken,
+  generateToken,
+  hashToken,
+  isRefreshTokenPayload,
+  verifyAuthToken,
+  buildUserPayload,
+} = require("../utils/auth");
 const { generateUniqueSellerId } = require("../utils/sellerIds");
+const { normalizePayoutDetails, toLocalMsisdn } = require("../utils/payoutDetails");
+const { getPlatformCommissionPercentage } = require("../utils/commission");
+const { hasAcceptedTerms, applyTermsAcceptance, termsRejectedPayload } = require("../utils/terms");
 const {
   sendProviderOnboardingEmail,
   sendEmailVerificationOtp,
   sendPasswordResetOtp,
+  sendLoginOtp,
 } = require("../utils/notify");
 const { REALTIME_EVENTS, emitRealtime } = require("../utils/realtime");
 
@@ -31,6 +45,57 @@ const buildGenericOtpResponse = (message) => ({
 });
 
 const canSendOtp = (lastSentAt) => secondsSince(lastSentAt) >= OTP_RESEND_COOLDOWN_SECONDS;
+
+const parseRememberMe = (value) => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  return ["true", "1", "yes", "on"].includes(String(value || "").trim().toLowerCase());
+};
+
+const clearLoginOtp = (user) => {
+  user.loginOtpHash = "";
+  user.loginOtpExpiresAt = null;
+  user.loginOtpAttempts = 0;
+  user.loginRememberMe = false;
+};
+
+const clearRefreshSession = (user) => {
+  user.refreshTokenHash = "";
+  user.refreshTokenExpiresAt = null;
+};
+
+const buildTokenResponse = ({ userPayload, accessToken, refreshToken, rememberMe }) => ({
+  user: userPayload,
+  token: accessToken,
+  accessToken,
+  refreshToken: refreshToken || null,
+  rememberMe: Boolean(rememberMe),
+  accessTokenExpiresIn: ACCESS_TOKEN_TTL_SECONDS,
+  refreshTokenExpiresIn: rememberMe ? REFRESH_TOKEN_TTL_SECONDS : null,
+});
+
+const issueSessionTokens = async (user, rememberMe) => {
+  const accessToken = generateAccessToken(user);
+  let refreshToken = null;
+
+  if (rememberMe) {
+    refreshToken = generateRefreshToken(user);
+    user.refreshTokenHash = hashToken(refreshToken);
+    user.refreshTokenExpiresAt = minutesFromNow(REFRESH_TOKEN_TTL_SECONDS / 60);
+  } else {
+    clearRefreshSession(user);
+  }
+
+  clearLoginOtp(user);
+  await user.save();
+
+  return buildTokenResponse({
+    userPayload: await buildAuthUserPayload(user),
+    accessToken,
+    refreshToken,
+    rememberMe,
+  });
+};
 
 const issueEmailVerificationOtp = async (user) => {
   if (user.emailVerified) return { sent: false, alreadyVerified: true };
@@ -64,6 +129,27 @@ const issuePasswordResetOtp = async (user) => {
   await user.save();
 
   await sendPasswordResetOtp({
+    email: user.email,
+    name: user.name,
+    otp,
+    expiresInMinutes: OTP_EXPIRY_MINUTES,
+  });
+
+  return { sent: true };
+};
+
+const issueLoginOtp = async (user, rememberMe) => {
+  if (!canSendOtp(user.loginOtpSentAt)) return { sent: false, cooldown: true };
+
+  const otp = createOtp();
+  user.loginOtpHash = await bcrypt.hash(otp, 10);
+  user.loginOtpExpiresAt = minutesFromNow(OTP_EXPIRY_MINUTES);
+  user.loginOtpAttempts = 0;
+  user.loginOtpSentAt = new Date();
+  user.loginRememberMe = Boolean(rememberMe);
+  await user.save();
+
+  await sendLoginOtp({
     email: user.email,
     name: user.name,
     otp,
@@ -335,7 +421,7 @@ const buildAuthUserPayload = async (user) => {
 
 const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, rememberMe } = req.body;
 
     if (!email || !password) {
       return res
@@ -370,13 +456,167 @@ const login = async (req, res) => {
       });
     }
 
-    const token = generateToken(user);
+    const persistSession = parseRememberMe(rememberMe);
+    const otpResult = await issueLoginOtp(user, persistSession);
+    if (otpResult.cooldown) {
+      return res.status(429).json({
+        code: "LOGIN_OTP_COOLDOWN",
+        message: `Please wait ${OTP_RESEND_COOLDOWN_SECONDS} seconds before requesting another login code.`,
+        expiresInMinutes: OTP_EXPIRY_MINUTES,
+        email: user.email,
+        rememberMe: persistSession,
+      });
+    }
+
     return res.json({
-      user: await buildAuthUserPayload(user),
-      token,
+      code: "LOGIN_OTP_REQUIRED",
+      message: "A login verification code has been sent to your email.",
+      email: user.email,
+      rememberMe: persistSession,
+      expiresInMinutes: OTP_EXPIRY_MINUTES,
+      termsAccepted: Boolean(user.termsAccepted),
     });
   } catch (error) {
     return res.status(500).json({ message: "Login failed.", error: error.message });
+  }
+};
+
+const resendLoginOtp = async (req, res) => {
+  try {
+    const normalizedEmail = normalizeEmail(req.body.email);
+    if (!isValidEmail(normalizedEmail)) {
+      return res.status(400).json({ message: "A valid email address is required." });
+    }
+
+    const generic = buildGenericOtpResponse(
+      "If a login is in progress for this email, a new verification code has been sent."
+    );
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user || !user.loginOtpHash || !user.emailVerified || user.mustSetPassword) {
+      return res.json(generic);
+    }
+
+    const result = await issueLoginOtp(user, Boolean(user.loginRememberMe));
+    if (result.cooldown) {
+      return res.status(429).json({
+        code: "LOGIN_OTP_COOLDOWN",
+        message: `Please wait ${OTP_RESEND_COOLDOWN_SECONDS} seconds before requesting another login code.`,
+      });
+    }
+
+    return res.json(generic);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to resend login code.", error: error.message });
+  }
+};
+
+const verifyLoginOtp = async (req, res) => {
+  try {
+    const normalizedEmail = normalizeEmail(req.body.email);
+    const otp = String(req.body.otp || "").trim();
+    if (!isValidEmail(normalizedEmail) || !otp) {
+      return res.status(400).json({ message: "A valid email and OTP are required." });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) return res.status(404).json({ message: "User not found." });
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        code: "EMAIL_NOT_VERIFIED",
+        message: "Please verify your email before logging in.",
+        email: user.email,
+        emailVerified: false,
+      });
+    }
+
+    const verification = await verifyOtp({
+      user,
+      otp,
+      hashField: "loginOtpHash",
+      expiresField: "loginOtpExpiresAt",
+      attemptsField: "loginOtpAttempts",
+    });
+    if (!verification.ok) {
+      return res.status(verification.status).json({ message: verification.message });
+    }
+
+    const rememberMe = Boolean(user.loginRememberMe);
+    const session = await issueSessionTokens(user, rememberMe);
+    return res.json({
+      message: "Login successful.",
+      ...session,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to verify login code.", error: error.message });
+  }
+};
+
+const refreshSession = async (req, res) => {
+  try {
+    const refreshToken = String(req.body.refreshToken || "").trim();
+    if (!refreshToken) {
+      return res.status(400).json({ message: "refreshToken is required." });
+    }
+
+    let decoded;
+    try {
+      decoded = verifyAuthToken(refreshToken);
+    } catch (_error) {
+      return res.status(401).json({ message: "Invalid or expired refresh token." });
+    }
+
+    if (!isRefreshTokenPayload(decoded) || !decoded.id) {
+      return res.status(401).json({ message: "Invalid or expired refresh token." });
+    }
+
+    const user = await User.findById(decoded.id);
+    if (!user || !user.refreshTokenHash) {
+      return res.status(401).json({ message: "Invalid or expired refresh token." });
+    }
+    if (user.refreshTokenExpiresAt && new Date(user.refreshTokenExpiresAt).getTime() <= Date.now()) {
+      clearRefreshSession(user);
+      await user.save();
+      return res.status(401).json({ message: "Invalid or expired refresh token." });
+    }
+    if (user.refreshTokenHash !== hashToken(refreshToken)) {
+      return res.status(401).json({ message: "Invalid or expired refresh token." });
+    }
+
+    const session = await issueSessionTokens(user, true);
+    return res.json({
+      message: "Session refreshed.",
+      ...session,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to refresh session.", error: error.message });
+  }
+};
+
+const logout = async (req, res) => {
+  try {
+    const refreshToken = String(req.body?.refreshToken || "").trim();
+    let user = req.user || null;
+
+    if (!user && refreshToken) {
+      try {
+        const decoded = verifyAuthToken(refreshToken);
+        if (isRefreshTokenPayload(decoded) && decoded.id) {
+          user = await User.findById(decoded.id);
+        }
+      } catch (_error) {
+        user = null;
+      }
+    }
+
+    if (user) {
+      clearRefreshSession(user);
+      clearLoginOtp(user);
+      await user.save();
+    }
+
+    return res.json({ message: "Logged out." });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to logout.", error: error.message });
   }
 };
 
@@ -400,17 +640,28 @@ const registerTourist = async (req, res) => {
         .json({ message: 'Only customer accounts can self-register.' });
     }
 
+    if (!hasAcceptedTerms(req.body)) {
+      return res.status(400).json(
+        termsRejectedPayload(
+          "You must accept the Terms of use and Privacy policy before creating an account."
+        )
+      );
+    }
+
     const existing = await User.findOne({ email: normalizedEmail });
     if (existing) {
       return res.status(409).json({ message: "User already exists." });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
+    const acceptedAt = new Date();
     const user = await User.create({
       name: name.trim(),
       email: normalizedEmail,
       password: hashedPassword,
       role: "customer",
+      termsAccepted: true,
+      termsAcceptedAt: acceptedAt,
     });
 
     let emailVerificationSent = false;
@@ -670,6 +921,13 @@ const completeProviderRegistration = async (req, res) => {
     if (confirmPassword !== undefined && String(confirmPassword) !== String(newPassword)) {
       return res.status(400).json({ message: "Password confirmation does not match." });
     }
+    if (!hasAcceptedTerms(req.body)) {
+      return res.status(400).json(
+        termsRejectedPayload(
+          "You must accept the Terms of use and Privacy policy before completing registration."
+        )
+      );
+    }
 
     const normalizedEmail = String(providerEmail).toLowerCase().trim();
     const normalizedSellerId = String(sellerId).toUpperCase().trim();
@@ -705,6 +963,32 @@ const completeProviderRegistration = async (req, res) => {
       return res.status(401).json({ message: "Invalid onboarding credentials." });
     }
 
+    const payoutResult = normalizePayoutDetails(
+      req.body.payoutDetails || req.body.paymentDetails || req.body.receivingPayment
+    );
+    if (!payoutResult.ok) {
+      return res.status(payoutResult.status).json({ message: payoutResult.message });
+    }
+
+    const businessInput =
+      (req.body.businessDetails && typeof req.body.businessDetails === "object" && req.body.businessDetails) ||
+      (req.body.business && typeof req.body.business === "object" && req.body.business) ||
+      {};
+    const businessName = String(businessInput.businessName || req.body.businessName || "").trim();
+    const businessType = String(businessInput.businessType || req.body.businessType || "other").trim() || "other";
+    const description = String(businessInput.description || req.body.description || "").trim();
+    const location = String(businessInput.location || req.body.location || "").trim();
+    const contactInfo = String(businessInput.contactInfo || req.body.contactInfo || "").trim();
+    const basePrice = Number(businessInput.basePrice || req.body.basePrice || 0);
+    const phone = toLocalMsisdn(req.body.phone || businessInput.phone || "");
+
+    let business = user.hotelId ? await Hotel.findById(user.hotelId) : null;
+    if (!business && !businessName) {
+      return res.status(400).json({
+        message: "Business name and payout details are required so this provider can receive booking payments.",
+      });
+    }
+
     user.password = await bcrypt.hash(String(newPassword), 12);
     user.mustSetPassword = false;
     user.emailVerified = false;
@@ -712,7 +996,49 @@ const completeProviderRegistration = async (req, res) => {
     user.emailVerificationOtpHash = "";
     user.emailVerificationOtpExpiresAt = null;
     user.emailVerificationOtpAttempts = 0;
+    applyTermsAcceptance(user);
+    user.payoutDetails = payoutResult.value;
+    if (phone) user.phone = phone;
     await user.save();
+
+    if (business) {
+      business.payoutDetails = payoutResult.value;
+      if (businessName) business.name = businessName;
+      if (businessType) business.type = businessType;
+      if (description) business.description = description;
+      if (location) business.location = location;
+      if (contactInfo) business.contactInfo = contactInfo;
+      if (Number.isFinite(basePrice) && basePrice > 0) business.basePrice = basePrice;
+      if (phone) {
+        business.contactDetails = {
+          ...(business.contactDetails || {}),
+          phone,
+        };
+      }
+      await business.save();
+    } else {
+      business = await Hotel.create({
+        name: businessName,
+        type: businessType,
+        location: location || "Rwanda",
+        description,
+        basePrice: Number.isFinite(basePrice) ? Math.max(0, basePrice) : 0,
+        contactInfo: contactInfo || user.email,
+        contactDetails: {
+          email: user.email,
+          phone: phone || "",
+        },
+        payoutDetails: payoutResult.value,
+        ownerEmail: user.email,
+        sellerContactEmail: user.email,
+        ownerUserId: user._id,
+        approvalStatus: "draft",
+        status: "unavailable",
+        commissionPercentage: getPlatformCommissionPercentage(),
+      });
+      user.hotelId = business._id;
+      await user.save();
+    }
 
     let emailVerificationSent = false;
     try {
@@ -726,6 +1052,14 @@ const completeProviderRegistration = async (req, res) => {
     return res.json({
       user: await buildAuthUserPayload(user),
       token,
+      business: {
+        id: business._id,
+        name: business.name,
+        type: business.type,
+        approvalStatus: business.approvalStatus,
+        payoutDetails: business.payoutDetails,
+      },
+      payoutDetails: payoutResult.value,
       message: "Service provider registration completed. Verify your email before logging in.",
       emailVerification: {
         required: true,
@@ -872,6 +1206,8 @@ const resetPassword = async (req, res) => {
     user.passwordResetOtpAttempts = 0;
     user.passwordChangedAt = new Date();
     user.mustSetPassword = false;
+    clearRefreshSession(user);
+    clearLoginOtp(user);
     await user.save();
 
     return res.json({
@@ -882,8 +1218,42 @@ const resetPassword = async (req, res) => {
   }
 };
 
+const acceptTerms = async (req, res) => {
+  try {
+    if (!hasAcceptedTerms(req.body) && req.body.accepted !== true) {
+      return res.status(400).json(
+        termsRejectedPayload(
+          "You must accept the Terms of use and Privacy policy to continue."
+        )
+      );
+    }
+
+    const user = req.user;
+    if (user.termsAccepted) {
+      return res.json({
+        message: "Terms and Privacy policy already accepted.",
+        user: await buildAuthUserPayload(user),
+      });
+    }
+
+    applyTermsAcceptance(user);
+    await user.save();
+
+    return res.json({
+      message: "Terms of use and Privacy policy accepted.",
+      user: await buildAuthUserPayload(user),
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to accept terms.", error: error.message });
+  }
+};
+
 module.exports = {
   login,
+  resendLoginOtp,
+  verifyLoginOtp,
+  refreshSession,
+  logout,
   registerTourist,
   registerBusinessByAdmin,
   completeProviderRegistration,
@@ -891,4 +1261,5 @@ module.exports = {
   verifyEmailOtp,
   forgotPassword,
   resetPassword,
+  acceptTerms,
 };
