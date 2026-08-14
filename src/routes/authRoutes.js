@@ -12,8 +12,9 @@ const {
   verifyEmailOtp,
   forgotPassword,
   resetPassword,
+  acceptTerms,
 } = require("../controllers/authController");
-const { protect, optionalProtect, adminOnly } = require("../middleware/authMiddleware");
+const { protect, protectAllowWithoutTerms, optionalProtect, adminOnly } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
@@ -28,6 +29,7 @@ router.post("/email/resend-verification-otp", resendVerificationOtp);
 router.post("/email/verify-otp", verifyEmailOtp);
 router.post("/forgot-password", forgotPassword);
 router.post("/reset-password", resetPassword);
+router.post("/accept-terms", protectAllowWithoutTerms, acceptTerms);
 router.post("/admin/register-business", protect, adminOnly, registerBusinessByAdmin);
 
 module.exports = router;

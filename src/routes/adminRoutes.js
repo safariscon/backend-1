@@ -42,6 +42,7 @@ const { protect, adminOnly } = require("../middleware/authMiddleware");
 const { imageUpload } = require("../middleware/uploadMiddleware");
 const { getMongoStorage, getCloudinaryStorage, getStorageOverview } = require("../controllers/storageController");
 const { getAnalyticsOverview, getAnalyticsServices, getAnalyticsPayments } = require("../controllers/analyticsController");
+const { listPayouts, syncPayout, getAdminFinance } = require("../controllers/paymentController");
 
 const router = express.Router();
 
@@ -77,6 +78,9 @@ router.put("/businesses/:businessId/verification", updateBusinessVerification);
 router.put("/businesses/:businessId/approval", updateBusinessVerification);
 router.delete("/businesses/:businessId", deleteBusiness);
 router.get("/transactions", listTransactions);
+router.get("/finance", getAdminFinance);
+router.get("/payouts", listPayouts);
+router.post("/payouts/:transactionId/sync", syncPayout);
 router.put("/transactions/:transactionId/commission", updateCommissionStatus);
 router.get("/marketplace/overview", getMarketplaceOverview);
 router.get("/marketplace/suppliers", listSuppliers);

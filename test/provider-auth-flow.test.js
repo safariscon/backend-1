@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("crypto");
 const User = require("../src/models/User");
+const Hotel = require("../src/models/Hotel");
 const { createSeller } = require("../src/controllers/adminController");
 const {
   completeProviderRegistration,
@@ -30,7 +31,10 @@ test("admin seller ID completes service provider onboarding and email verificati
   const originalFindOne = User.findOne;
   const originalCreate = User.create;
   const originalExists = User.exists;
+  const originalHotelCreate = Hotel.create;
+  const originalHotelFindById = Hotel.findById;
   const originalRandomInt = crypto.randomInt;
+  let storedHotel = null;
 
   User.findOne = async (query) => {
     if (!storedUser || query.email !== storedUser.email) return null;
@@ -52,11 +56,23 @@ test("admin seller ID completes service provider onboarding and email verificati
     return storedUser;
   };
   crypto.randomInt = () => 123456;
+  Hotel.findById = (id) => {
+    const hotel = storedHotel && String(storedHotel._id) === String(id) ? storedHotel : null;
+    const query = Promise.resolve(hotel);
+    query.select = async () => hotel;
+    return query;
+  };
+  Hotel.create = async (data) => {
+    storedHotel = { ...data, _id: "507f1f77bcf86cd799439099", async save() { return this; } };
+    return storedHotel;
+  };
 
   context.after(() => {
     User.findOne = originalFindOne;
     User.create = originalCreate;
     User.exists = originalExists;
+    Hotel.create = originalHotelCreate;
+    Hotel.findById = originalHotelFindById;
     crypto.randomInt = originalRandomInt;
   });
 
@@ -86,6 +102,18 @@ test("admin seller ID completes service provider onboarding and email verificati
         ...createResponse.body.credentials,
         newPassword,
         confirmPassword: newPassword,
+        phone: "0788302208",
+        businessName: "Demo Lodge",
+        businessType: "hotel",
+        location: "Musanze, Rwanda",
+        description: "Mountain lodge",
+        payoutDetails: {
+          method: "momo",
+          providerId: "63510",
+          accountName: "Demo Provider",
+          accountNumber: "0788302208",
+        },
+        acceptedTerms: true,
       },
     },
     completionResponse
@@ -93,6 +121,7 @@ test("admin seller ID completes service provider onboarding and email verificati
   assert.equal(completionResponse.statusCode, 200);
   assert.equal(completionResponse.body.user.sellerId, createResponse.body.credentials.sellerId);
   assert.equal(storedUser.mustSetPassword, false);
+  assert.equal(storedUser.termsAccepted, true);
   assert.equal(storedUser.emailVerified, false);
   assert.equal(completionResponse.body.emailVerification.sent, true);
 

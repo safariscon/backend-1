@@ -58,13 +58,14 @@ test("customer registration sends verification OTP and OTP can verify email", as
 
   const registerResponse = response();
   await registerTourist(
-    { body: { name: "Demo Customer", email: "Customer@Example.com", password: "Password123!", role: "customer" } },
+    { body: { name: "Demo Customer", email: "Customer@Example.com", password: "Password123!", role: "customer", acceptedTerms: true } },
     registerResponse
   );
 
   assert.equal(registerResponse.statusCode, 201);
   assert.equal(registerResponse.body.user.email, "customer@example.com");
   assert.equal(registerResponse.body.user.emailVerified, false);
+  assert.equal(registerResponse.body.user.termsAccepted, true);
   assert.equal(registerResponse.body.emailVerification.sent, true);
   assert.ok(storedUser.emailVerificationOtpHash);
 

@@ -55,6 +55,8 @@ const buildUserPayload = (user) => ({
   sellerId: user.sellerId || "",
   phone: user.phone || "",
   emailVerified: Boolean(user.emailVerified),
+  termsAccepted: Boolean(user.termsAccepted),
+  termsAcceptedAt: user.termsAcceptedAt || null,
 });
 
 module.exports = {

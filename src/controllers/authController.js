@@ -16,6 +16,9 @@ const {
   buildUserPayload,
 } = require("../utils/auth");
 const { generateUniqueSellerId } = require("../utils/sellerIds");
+const { normalizePayoutDetails, toLocalMsisdn } = require("../utils/payoutDetails");
+const { getPlatformCommissionPercentage } = require("../utils/commission");
+const { hasAcceptedTerms, applyTermsAcceptance, termsRejectedPayload } = require("../utils/terms");
 const {
   sendProviderOnboardingEmail,
   sendEmailVerificationOtp,
@@ -471,6 +474,7 @@ const login = async (req, res) => {
       email: user.email,
       rememberMe: persistSession,
       expiresInMinutes: OTP_EXPIRY_MINUTES,
+      termsAccepted: Boolean(user.termsAccepted),
     });
   } catch (error) {
     return res.status(500).json({ message: "Login failed.", error: error.message });
@@ -636,17 +640,28 @@ const registerTourist = async (req, res) => {
         .json({ message: 'Only customer accounts can self-register.' });
     }
 
+    if (!hasAcceptedTerms(req.body)) {
+      return res.status(400).json(
+        termsRejectedPayload(
+          "You must accept the Terms of use and Privacy policy before creating an account."
+        )
+      );
+    }
+
     const existing = await User.findOne({ email: normalizedEmail });
     if (existing) {
       return res.status(409).json({ message: "User already exists." });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
+    const acceptedAt = new Date();
     const user = await User.create({
       name: name.trim(),
       email: normalizedEmail,
       password: hashedPassword,
       role: "customer",
+      termsAccepted: true,
+      termsAcceptedAt: acceptedAt,
     });
 
     let emailVerificationSent = false;
@@ -906,6 +921,13 @@ const completeProviderRegistration = async (req, res) => {
     if (confirmPassword !== undefined && String(confirmPassword) !== String(newPassword)) {
       return res.status(400).json({ message: "Password confirmation does not match." });
     }
+    if (!hasAcceptedTerms(req.body)) {
+      return res.status(400).json(
+        termsRejectedPayload(
+          "You must accept the Terms of use and Privacy policy before completing registration."
+        )
+      );
+    }
 
     const normalizedEmail = String(providerEmail).toLowerCase().trim();
     const normalizedSellerId = String(sellerId).toUpperCase().trim();
@@ -941,6 +963,32 @@ const completeProviderRegistration = async (req, res) => {
       return res.status(401).json({ message: "Invalid onboarding credentials." });
     }
 
+    const payoutResult = normalizePayoutDetails(
+      req.body.payoutDetails || req.body.paymentDetails || req.body.receivingPayment
+    );
+    if (!payoutResult.ok) {
+      return res.status(payoutResult.status).json({ message: payoutResult.message });
+    }
+
+    const businessInput =
+      (req.body.businessDetails && typeof req.body.businessDetails === "object" && req.body.businessDetails) ||
+      (req.body.business && typeof req.body.business === "object" && req.body.business) ||
+      {};
+    const businessName = String(businessInput.businessName || req.body.businessName || "").trim();
+    const businessType = String(businessInput.businessType || req.body.businessType || "other").trim() || "other";
+    const description = String(businessInput.description || req.body.description || "").trim();
+    const location = String(businessInput.location || req.body.location || "").trim();
+    const contactInfo = String(businessInput.contactInfo || req.body.contactInfo || "").trim();
+    const basePrice = Number(businessInput.basePrice || req.body.basePrice || 0);
+    const phone = toLocalMsisdn(req.body.phone || businessInput.phone || "");
+
+    let business = user.hotelId ? await Hotel.findById(user.hotelId) : null;
+    if (!business && !businessName) {
+      return res.status(400).json({
+        message: "Business name and payout details are required so this provider can receive booking payments.",
+      });
+    }
+
     user.password = await bcrypt.hash(String(newPassword), 12);
     user.mustSetPassword = false;
     user.emailVerified = false;
@@ -948,7 +996,49 @@ const completeProviderRegistration = async (req, res) => {
     user.emailVerificationOtpHash = "";
     user.emailVerificationOtpExpiresAt = null;
     user.emailVerificationOtpAttempts = 0;
+    applyTermsAcceptance(user);
+    user.payoutDetails = payoutResult.value;
+    if (phone) user.phone = phone;
     await user.save();
+
+    if (business) {
+      business.payoutDetails = payoutResult.value;
+      if (businessName) business.name = businessName;
+      if (businessType) business.type = businessType;
+      if (description) business.description = description;
+      if (location) business.location = location;
+      if (contactInfo) business.contactInfo = contactInfo;
+      if (Number.isFinite(basePrice) && basePrice > 0) business.basePrice = basePrice;
+      if (phone) {
+        business.contactDetails = {
+          ...(business.contactDetails || {}),
+          phone,
+        };
+      }
+      await business.save();
+    } else {
+      business = await Hotel.create({
+        name: businessName,
+        type: businessType,
+        location: location || "Rwanda",
+        description,
+        basePrice: Number.isFinite(basePrice) ? Math.max(0, basePrice) : 0,
+        contactInfo: contactInfo || user.email,
+        contactDetails: {
+          email: user.email,
+          phone: phone || "",
+        },
+        payoutDetails: payoutResult.value,
+        ownerEmail: user.email,
+        sellerContactEmail: user.email,
+        ownerUserId: user._id,
+        approvalStatus: "draft",
+        status: "unavailable",
+        commissionPercentage: getPlatformCommissionPercentage(),
+      });
+      user.hotelId = business._id;
+      await user.save();
+    }
 
     let emailVerificationSent = false;
     try {
@@ -962,6 +1052,14 @@ const completeProviderRegistration = async (req, res) => {
     return res.json({
       user: await buildAuthUserPayload(user),
       token,
+      business: {
+        id: business._id,
+        name: business.name,
+        type: business.type,
+        approvalStatus: business.approvalStatus,
+        payoutDetails: business.payoutDetails,
+      },
+      payoutDetails: payoutResult.value,
       message: "Service provider registration completed. Verify your email before logging in.",
       emailVerification: {
         required: true,
@@ -1120,6 +1218,36 @@ const resetPassword = async (req, res) => {
   }
 };
 
+const acceptTerms = async (req, res) => {
+  try {
+    if (!hasAcceptedTerms(req.body) && req.body.accepted !== true) {
+      return res.status(400).json(
+        termsRejectedPayload(
+          "You must accept the Terms of use and Privacy policy to continue."
+        )
+      );
+    }
+
+    const user = req.user;
+    if (user.termsAccepted) {
+      return res.json({
+        message: "Terms and Privacy policy already accepted.",
+        user: await buildAuthUserPayload(user),
+      });
+    }
+
+    applyTermsAcceptance(user);
+    await user.save();
+
+    return res.json({
+      message: "Terms of use and Privacy policy accepted.",
+      user: await buildAuthUserPayload(user),
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to accept terms.", error: error.message });
+  }
+};
+
 module.exports = {
   login,
   resendLoginOtp,
@@ -1133,4 +1261,5 @@ module.exports = {
   verifyEmailOtp,
   forgotPassword,
   resetPassword,
+  acceptTerms,
 };

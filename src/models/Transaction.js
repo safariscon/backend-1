@@ -58,6 +58,22 @@ const transactionSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    platformAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    providerAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    commissionPercentage: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 100,
+    },
     paymentMethod: {
       type: String,
       enum: ["mobile-money", "card", "bank-transfer", "cash", "placeholder", "simulation-mobile-money", "simulation-card"],
@@ -77,6 +93,97 @@ const transactionSchema = new mongoose.Schema(
       type: String,
       required: true,
       index: true,
+    },
+    customerRef: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+    collectionRef: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+    collectionTid: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    collectionAuthKey: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    collectionStatus: {
+      type: String,
+      enum: ["pending", "success", "failed"],
+      default: "pending",
+      index: true,
+    },
+    checkoutUrl: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    payoutReference: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+    payoutInternalRef: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    payoutStatus: {
+      type: String,
+      enum: ["none", "held", "batched", "pending", "successful", "failed", "reversed"],
+      default: "none",
+      index: true,
+    },
+    payoutMessage: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    payoutProviderId: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    refundPayoutReference: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    refundPayoutStatus: {
+      type: String,
+      enum: ["none", "pending", "successful", "failed"],
+      default: "none",
+    },
+    refundPayoutMessage: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    verifiedAccountName: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    customerPayment: {
+      email: { type: String, default: "", trim: true },
+      name: { type: String, default: "", trim: true },
+      phone: { type: String, default: "", trim: true },
+      msisdn: { type: String, default: "", trim: true },
+      method: { type: String, default: "", trim: true },
+    },
+    gatewayRaw: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
     },
     status: {
       type: String,

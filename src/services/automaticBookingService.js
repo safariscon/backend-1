@@ -98,10 +98,8 @@ const calculateQuote = ({ option, people, quantity }) => {
   const guests = Math.max(1, Number(people));
   const totalConsumptionUnits = Math.max(1, Math.floor(guests * units));
   const total = Math.round(base * totalConsumptionUnits);
-  const deposit = Math.round(total * 0.3);
-  const remaining = total - deposit;
-  const reason = `You will pay RWF ${deposit.toLocaleString("en-US")} now because you selected ${option.name} at RWF ${base.toLocaleString("en-US")} for ${guests} people and ${units} quantity/unit(s). The total consumption units are ${totalConsumptionUnits}. The full price is RWF ${total.toLocaleString("en-US")}, and the required deposit is 30%. Provider details will unlock after successful payment.`;
-  return { total, deposit, remaining, reason, totalConsumptionUnits };
+  const reason = `You will pay the full amount of RWF ${total.toLocaleString("en-US")} now. Provider details unlock after successful payment. You may cancel until a few hours before the service starts; a cancellation fee then stays in the SafarisCon wallet.`;
+  return { total, deposit: total, remaining: 0, reason, totalConsumptionUnits };
 };
 
 const getActivePromotion = (promotion, now = new Date()) => {
@@ -133,19 +131,19 @@ const applyPromotionToQuote = ({ quote, promotion, now = new Date() }) => {
       promotionPercent: 0,
       discountAmount: 0,
       finalPrice: originalPrice,
-      depositPercent: 30,
-      depositAmount: Math.round(originalPrice * 0.3),
-      remaining: originalPrice - Math.round(originalPrice * 0.3),
+      depositPercent: 100,
+      depositAmount: originalPrice,
+      remaining: 0,
     };
   }
   const discountAmount = Math.round((originalPrice * activePromotion.percent) / 100);
   const finalPrice = Math.max(0, originalPrice - discountAmount);
-  const depositAmount = Math.round(finalPrice * 0.3);
+  const depositAmount = finalPrice;
   return {
     ...quote,
     total: finalPrice,
     deposit: depositAmount,
-    remaining: finalPrice - depositAmount,
+    remaining: 0,
     originalPrice,
     promotionApplied: true,
     promotionTitle: activePromotion.title,
@@ -155,9 +153,9 @@ const applyPromotionToQuote = ({ quote, promotion, now = new Date() }) => {
     promotionEndAt: activePromotion.endAt,
     discountAmount,
     finalPrice,
-    depositPercent: 30,
+    depositPercent: 100,
     depositAmount,
-    reason: `${activePromotion.title}: Save ${activePromotion.percent}% on this service. Valid from ${activePromotion.startAt.toLocaleDateString("en-US")} to ${activePromotion.endAt.toLocaleDateString("en-US")}. The discounted price is RWF ${finalPrice.toLocaleString("en-US")}, and the required 30% deposit is RWF ${depositAmount.toLocaleString("en-US")}.`,
+    reason: `${activePromotion.title}: Save ${activePromotion.percent}% on this service. Valid from ${activePromotion.startAt.toLocaleDateString("en-US")} to ${activePromotion.endAt.toLocaleDateString("en-US")}. Pay the full discounted price of RWF ${finalPrice.toLocaleString("en-US")} now.`,
   };
 };
 

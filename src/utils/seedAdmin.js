@@ -46,6 +46,8 @@ const seedAdmin = async () => {
     refreshTokenHash: "",
     refreshTokenExpiresAt: null,
     passwordChangedAt: new Date(),
+    termsAccepted: true,
+    termsAcceptedAt: existing?.termsAcceptedAt || verifiedAt,
   };
 
   if (!existing) {
@@ -85,6 +87,8 @@ const seedAdmin = async () => {
     await User.create({
       ...helper,
       password: hashedPassword,
+      termsAccepted: true,
+      termsAcceptedAt: new Date(),
     });
   }
 };

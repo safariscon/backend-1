@@ -7,6 +7,7 @@ const bookingRoutes = require("./routes/bookingRoutes");
 const rebookRoutes = require("./routes/rebookRoutes");
 const hotelRoutes = require("./routes/hotelRoutes");
 const publicRoutes = require("./routes/publicRoutes");
+const paymentRoutes = require("./routes/paymentRoutes");
 const analyticsRoutes = require("./routes/analyticsRoutes");
 const { getDbState, requireDatabase } = require("./middleware/databaseMiddleware");
 
@@ -81,6 +82,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/analytics", analyticsRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/bookings", bookingRoutes);
+app.use("/api/payments", paymentRoutes);
 app.use("/api/rebook", rebookRoutes);
 app.use("/api/hotel", hotelRoutes);
 app.use("/api/seller", hotelRoutes);
