@@ -37,6 +37,7 @@ const {
   calculateQuote,
   applyPromotionToQuote,
   getActivePromotion,
+  validateBookingSchedule,
 } = require("../services/automaticBookingService");
 
 const publicFrontendUrl = () =>
@@ -370,27 +371,20 @@ const createBookingRequest = async (req, res) => {
         message: "Customer province, district, sector, cell, and village are required.",
       });
     }
-    const normalizedBookingDateValue = bookingDate || rawDetails.bookingDate || checkIn;
-    const normalizedEndBookingDateValue = endBookingDate || rawDetails.endBookingDate || checkOut;
+    const normalizedBookingDateValue =
+      bookingDate ||
+      req.body.startDate ||
+      rawDetails.bookingDate ||
+      rawDetails.startDate ||
+      checkIn;
+    const normalizedEndBookingDateValue =
+      endBookingDate ||
+      req.body.endDate ||
+      rawDetails.endBookingDate ||
+      rawDetails.endDate ||
+      checkOut;
     const normalizedStartTime = cleanText(startTime || rawDetails.startTime, 20);
     const normalizedEndTime = cleanText(endTime || rawDetails.endTime, 20);
-    if (!normalizedBookingDateValue || !normalizedEndBookingDateValue || !normalizedStartTime || !normalizedEndTime) {
-      return res.status(400).json({
-        message: "Booking date, end booking date, start time, and end time are required.",
-      });
-    }
-    const normalizedBookingDate = new Date(normalizedBookingDateValue);
-    const normalizedEndBookingDate = new Date(normalizedEndBookingDateValue);
-    if (Number.isNaN(normalizedBookingDate.getTime()) || Number.isNaN(normalizedEndBookingDate.getTime())) {
-      return res.status(400).json({ message: "Booking date and end booking date must be valid dates." });
-    }
-    if (normalizedEndBookingDate < normalizedBookingDate) {
-      return res.status(400).json({ message: "End booking date cannot be before booking date." });
-    }
-    details.bookingDate = normalizedBookingDateValue;
-    details.endBookingDate = normalizedEndBookingDateValue;
-    details.startTime = normalizedStartTime;
-    details.endTime = normalizedEndTime;
     const setting = SiteSetting.db.readyState === 1
       ? await SiteSetting.findOne({ key: "marketplace-settings" }).lean()
       : null;
@@ -403,11 +397,37 @@ const createBookingRequest = async (req, res) => {
     let selectedOption = null;
     let bookingStatus = "pending";
     let paymentStatus = "unpaid";
-    if (effectiveMode === "automatic") {
-      if (!selectedBusiness) return res.status(400).json({ message: "Select a service before using automatic booking." });
+    if (selectedBusiness) {
       selectedOption = (selectedBusiness.availabilityTable?.rows || [])
         .map(normalizePriceOption)
-        .find((option) => option.id === rawDetails.selectedOptionId || option.name === rawDetails.requestedService);
+        .find((option) =>
+          option.id === rawDetails.selectedOptionId ||
+          option.id === req.body.selectedOptionId ||
+          option.name === rawDetails.requestedService
+        ) || null;
+    }
+
+    const schedule = validateBookingSchedule({
+      option: selectedOption || {},
+      startDate: normalizedBookingDateValue,
+      endDate: normalizedEndBookingDateValue,
+      startTime: normalizedStartTime,
+      endTime: normalizedEndTime,
+    });
+    if (!schedule.ok) {
+      return res.status(schedule.status).json({ message: schedule.message });
+    }
+    details.bookingDate = schedule.startDate;
+    details.endBookingDate = schedule.endDate;
+    details.startDate = schedule.startDate;
+    details.endDate = schedule.endDate;
+    details.startTime = schedule.startTime;
+    details.endTime = schedule.endTime;
+    const normalizedBookingDate = new Date(`${schedule.startDate}T12:00:00Z`);
+    const normalizedEndBookingDate = new Date(`${schedule.endDate}T12:00:00Z`);
+
+    if (effectiveMode === "automatic") {
+      if (!selectedBusiness) return res.status(400).json({ message: "Select a service before using automatic booking." });
       if (!isAutomaticReady(selectedBusiness, selectedOption)) {
         return res.status(409).json({
           message: "Automatic booking is not ready for this option. The seller must add a clear price type, calculation field, duration unit, and availability.",
@@ -480,8 +500,8 @@ const createBookingRequest = async (req, res) => {
       checkOut: checkOut || normalizedEndBookingDate,
       bookingDate: normalizedBookingDate,
       endBookingDate: normalizedEndBookingDate,
-      startTime: normalizedStartTime,
-      endTime: normalizedEndTime,
+      startTime: schedule.startTime,
+      endTime: schedule.endTime,
       guests: Number(guests) || bookingQuantity,
       numberOfPeople: bookingPeople,
       quantity: bookingQuantity,
