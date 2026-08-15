@@ -9,6 +9,7 @@ const hotelRoutes = require("./routes/hotelRoutes");
 const publicRoutes = require("./routes/publicRoutes");
 const paymentRoutes = require("./routes/paymentRoutes");
 const analyticsRoutes = require("./routes/analyticsRoutes");
+const geoRoutes = require("./routes/geoRoutes");
 const { getDbState, requireDatabase } = require("./middleware/databaseMiddleware");
 
 const app = express();
@@ -73,8 +74,10 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
+app.use("/api/geo", geoRoutes);
+
 app.use("/api", (req, res, next) => {
-  if (req.path === "/health") return next();
+  if (req.path === "/health" || req.path.startsWith("/geo")) return next();
   return requireDatabase(req, res, next);
 });
 

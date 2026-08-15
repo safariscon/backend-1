@@ -7,6 +7,7 @@ const { REALTIME_EVENTS, emitHotelRealtime, emitRealtime, emitUserRealtime } = r
 const { prefixedCode, secureToken } = require("../utils/secureIds");
 const { createPdfReceipt } = require("../utils/pdfReceipt");
 const { createGuestName } = require("../utils/anonymousBusiness");
+const { getPublicLocation, getUnlockedServiceLocation } = require("../utils/serviceLocation");
 const { storeBookingPdf, getBookingPdfDownloadUrl } = require("../services/bookingPdfStorage");
 const { buildEventData, recordAnalyticsEvent } = require("./analyticsController");
 const { claimRebookId, finalizeRebookIdUse, releaseRebookIdClaim } = require("./rebookController");
@@ -60,35 +61,6 @@ const locationIsUnlockedForCustomer = (booking, customerId) =>
   String(booking?.touristId?._id || booking?.touristId || "") === String(customerId || "") &&
   booking?.depositPaid === true &&
   booking?.locationUnlocked === true;
-
-const getPublicLocation = (business = {}) => {
-  const source = business.serviceLocation || business.locationDetails || {};
-  return {
-    country: "Rwanda",
-    province: source.province || business.locationDetails?.province || "",
-    district: source.district || business.locationDetails?.district || "",
-    sector: source.sector || business.locationDetails?.sector || "",
-    message: "Pay the full booking amount to unlock exact location and directions.",
-  };
-};
-
-const getUnlockedServiceLocation = (business = {}) => {
-  const source = business.serviceLocation || {};
-  const contactDetails = business.contactDetails || {};
-  return {
-    country: "Rwanda",
-    province: source.province || business.locationDetails?.province || "",
-    district: source.district || business.locationDetails?.district || "",
-    sector: source.sector || business.locationDetails?.sector || "",
-    cell: source.cell || business.locationDetails?.cell || "",
-    village: source.village || business.locationDetails?.village || "",
-    fullAddress: source.fullAddress || contactDetails.exactAddress || business.location || "",
-    latitude: source.latitude ?? contactDetails.latitude ?? null,
-    longitude: source.longitude ?? contactDetails.longitude ?? null,
-    locationSource: source.locationSource || "admin_manual",
-    isExactLocationVerified: Boolean(source.isExactLocationVerified),
-  };
-};
 
 const sanitizeBusinessLocationForCustomer = (business, booking, customerId) => {
   if (!business) return business;

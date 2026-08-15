@@ -12,6 +12,12 @@ const DEFAULT_ADMIN = {
   password: "admin@1234",
 };
 
+const SEEDED_NON_ADMIN_EMAILS = [
+  "eric.helper@safarisconn.com",
+  "diane.helper@safarisconn.com",
+  "john.helper@safarisconn.com",
+];
+
 const seedAdmin = async () => {
   const adminEmail = (process.env.SEED_ADMIN_EMAIL || DEFAULT_ADMIN.email)
     .toLowerCase()
@@ -52,44 +58,18 @@ const seedAdmin = async () => {
 
   if (!existing) {
     await User.create(adminFields);
-
     console.log(`Seeded admin: ${adminEmail}`);
   } else {
     await User.updateOne({ _id: existing._id }, { $set: adminFields });
     console.log(`Updated admin: ${adminEmail}`);
   }
 
-  const helperSeed = [
-    {
-      name: "Eric Guide",
-      email: "eric.helper@safarisconn.com",
-      phone: "0780000001",
-      role: "tourHelper",
-    },
-    {
-      name: "Diane Helper",
-      email: "diane.helper@safarisconn.com",
-      phone: "0790000002",
-      role: "tourHelper",
-    },
-    {
-      name: "John Support",
-      email: "john.helper@safarisconn.com",
-      phone: "0720000003",
-      role: "tourHelper",
-    },
-  ];
-
-  for (const helper of helperSeed) {
-    const exists = await User.findOne({ email: helper.email });
-    if (exists) continue;
-
-    await User.create({
-      ...helper,
-      password: hashedPassword,
-      termsAccepted: true,
-      termsAcceptedAt: new Date(),
-    });
+  const removed = await User.deleteMany({
+    email: { $in: SEEDED_NON_ADMIN_EMAILS },
+    role: { $ne: "admin" },
+  });
+  if (removed.deletedCount) {
+    console.log(`Removed ${removed.deletedCount} seeded non-admin user(s).`);
   }
 };
 

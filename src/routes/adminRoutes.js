@@ -16,6 +16,7 @@ const {
   createSeller,
   updateAnnouncement,
   listServices,
+  getServiceDetail,
   updateBusinessVerification,
   approveBooking,
   rejectBooking,
@@ -74,6 +75,14 @@ router.put("/bookings/:bookingId/reject", rejectBooking);
 router.put("/marketplace-settings", updateMarketplaceSettings);
 router.put("/businesses/:businessId/booking-mode", updateServiceBookingMode);
 router.get("/services", listServices);
+router.get("/services/:serviceId", getServiceDetail);
+router.put("/services/:serviceId/approval", updateBusinessVerification);
+router.patch("/services/:serviceId/approval", updateBusinessVerification);
+router.post("/services/:serviceId/approval", updateBusinessVerification);
+router.put("/services/:serviceId/verification", updateBusinessVerification);
+router.put("/services/:serviceId/approve", updateBusinessVerification);
+router.put("/services/:serviceId/reject", updateBusinessVerification);
+router.put("/services/:serviceId/booking-mode", updateServiceBookingMode);
 router.put("/businesses/:businessId/verification", updateBusinessVerification);
 router.put("/businesses/:businessId/approval", updateBusinessVerification);
 router.delete("/businesses/:businessId", deleteBusiness);

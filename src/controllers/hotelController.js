@@ -20,6 +20,11 @@ const { sendManualBookingApprovedEmail } = require("../utils/notify");
 const { hasCompletePayoutDetails, normalizePayoutDetails } = require("../utils/payoutDetails");
 const { normalizeCancelPolicy, cancelCommissionPercentOf } = require("../utils/cancellation");
 const { normalizeAvailabilityTable } = require("../services/automaticBookingService");
+const {
+  isCoordinateInsideRwanda,
+  normalizeServiceLocation,
+  serviceLocationHasCoordinates,
+} = require("../utils/serviceLocation");
 
 const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
 const DEPOSIT_PERCENT = 30;
@@ -72,46 +77,6 @@ const sellerBusinessFilter = (req) => ({
 const getSellerBusinessIds = async (req) => Hotel.find(sellerBusinessFilter(req)).distinct("_id");
 
 const normalizeBookingCode = (value) => String(value || "").trim().toUpperCase();
-
-const RWANDA_COORDINATE_BOUNDS = {
-  minLatitude: -2.9,
-  maxLatitude: -1.0,
-  minLongitude: 28.8,
-  maxLongitude: 31.0,
-};
-
-const isCoordinateInsideRwanda = (latitude, longitude) =>
-  Number.isFinite(latitude) &&
-  Number.isFinite(longitude) &&
-  latitude >= RWANDA_COORDINATE_BOUNDS.minLatitude &&
-  latitude <= RWANDA_COORDINATE_BOUNDS.maxLatitude &&
-  longitude >= RWANDA_COORDINATE_BOUNDS.minLongitude &&
-  longitude <= RWANDA_COORDINATE_BOUNDS.maxLongitude;
-
-const normalizeServiceLocation = (input = {}) => {
-  const latitude = input.latitude === "" || input.latitude === null || input.latitude === undefined ? null : Number(input.latitude);
-  const longitude = input.longitude === "" || input.longitude === null || input.longitude === undefined ? null : Number(input.longitude);
-  const locationSource = ["search", "map_click", "gps", "admin_manual"].includes(input.locationSource)
-    ? input.locationSource
-    : "map_click";
-
-  return {
-    country: "Rwanda",
-    province: String(input.province || "").trim(),
-    district: String(input.district || "").trim(),
-    sector: String(input.sector || "").trim(),
-    cell: String(input.cell || "").trim(),
-    village: String(input.village || "").trim(),
-    fullAddress: String(input.fullAddress || "").trim(),
-    latitude: Number.isFinite(latitude) ? latitude : null,
-    longitude: Number.isFinite(longitude) ? longitude : null,
-    locationSource,
-    isExactLocationVerified: Boolean(input.isExactLocationVerified),
-  };
-};
-
-const serviceLocationHasCoordinates = (serviceLocation) =>
-  Number.isFinite(serviceLocation.latitude) && Number.isFinite(serviceLocation.longitude);
 
 const getRemainingAmount = (booking) => {
   const finalPrice = Number(booking.priceSnapshot?.finalPrice || booking.totalPrice || 0);
@@ -804,7 +769,7 @@ const upsertMyService = async (req, res) => {
       cell: serviceLocation.cell,
       village: serviceLocation.village,
     };
-    const fullLocation = serviceLocation.fullAddress || [
+    const fullLocation = serviceLocation.formattedAddress || serviceLocation.fullAddress || [
       serviceLocation.village,
       serviceLocation.cell,
       serviceLocation.sector,

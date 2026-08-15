@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const { PRICE_MODELS } = require("../constants/marketplace");
+const { serviceLocationFields } = require("./serviceLocationFields");
 
 const hotelServiceSchema = new mongoose.Schema(
   {
@@ -58,23 +59,7 @@ const hotelServiceSchema = new mongoose.Schema(
       default: "",
       trim: true,
     },
-    serviceLocation: {
-      country: { type: String, default: "Rwanda", trim: true },
-      province: { type: String, default: "", trim: true },
-      district: { type: String, default: "", trim: true, index: true },
-      sector: { type: String, default: "", trim: true },
-      cell: { type: String, default: "", trim: true },
-      village: { type: String, default: "", trim: true },
-      fullAddress: { type: String, default: "", trim: true },
-      latitude: { type: Number, default: null },
-      longitude: { type: Number, default: null },
-      locationSource: {
-        type: String,
-        enum: ["search", "map_click", "gps", "admin_manual"],
-        default: "map_click",
-      },
-      isExactLocationVerified: { type: Boolean, default: false },
-    },
+    serviceLocation: serviceLocationFields(),
     images: {
       type: [String],
       default: [],

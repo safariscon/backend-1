@@ -14,6 +14,12 @@ const { generateUniqueSellerId } = require("../utils/sellerIds");
 const { sendProviderOnboardingEmail, sendBusinessApprovedEmail } = require("../utils/notify");
 const { buildProviderInviteUrl, normalizeSellerId } = require("../utils/providerOnboarding");
 const { buildAdminServiceFilter } = require("../utils/serviceFilters");
+const {
+  serializeAdminServiceListItem,
+  serializeAdminServiceDetail,
+  serializeProvider,
+  resolveApprovalStatus,
+} = require("../utils/adminServiceView");
 const mongoose = require("mongoose");
 const {
   REALTIME_EVENTS,
@@ -122,6 +128,74 @@ const resolveProviderOwnerId = async (query = {}) => {
   return { ownerUserId: null, applied: false };
 };
 
+const PROVIDER_DETAIL_SELECT =
+  "name email phone sellerId role emailVerified mustSetPassword createdAt payoutDetails";
+
+const loadProviderForBusiness = async (business) => {
+  if (!business) return null;
+  const populated =
+    business.ownerUserId && typeof business.ownerUserId === "object" && business.ownerUserId.email
+      ? business.ownerUserId
+      : null;
+  const ownerId = business.ownerUserId?._id || business.ownerUserId;
+  if (isObjectId(ownerId)) {
+    const byId = await User.findById(ownerId).select(PROVIDER_DETAIL_SELECT).lean();
+    if (byId) return byId;
+  }
+  if (populated) return populated;
+  const email = String(business.sellerContactEmail || "").toLowerCase().trim();
+  if (!email || /@seller\.local$|@business\.local$/i.test(email)) return null;
+  return User.findOne({ email, role: { $in: ["hotel", "supplier"] } }).select(PROVIDER_DETAIL_SELECT).lean();
+};
+
+const loadProvidersForBusinesses = async (businesses = []) => {
+  const ids = [
+    ...new Set(
+      businesses
+        .map((business) => String(business.ownerUserId?._id || business.ownerUserId || ""))
+        .filter((id) => isObjectId(id))
+    ),
+  ];
+  const emails = [
+    ...new Set(
+      businesses
+        .map((business) => String(business.sellerContactEmail || "").toLowerCase().trim())
+        .filter((email) => email && !/@seller\.local$|@business\.local$/i.test(email))
+    ),
+  ];
+  if (!ids.length && !emails.length) return { byId: new Map(), byEmail: new Map() };
+
+  const users = await User.find({
+    $or: [
+      ...(ids.length ? [{ _id: { $in: ids } }] : []),
+      ...(emails.length ? [{ email: { $in: emails } }] : []),
+    ],
+  })
+    .select(PROVIDER_DETAIL_SELECT)
+    .lean();
+
+  const byId = new Map(users.map((user) => [String(user._id), user]));
+  const byEmail = new Map(users.map((user) => [String(user.email || "").toLowerCase(), user]));
+
+  return { byId, byEmail };
+};
+
+const providerForBusiness = (business, lookup) => {
+  const populated = business.ownerUserId && typeof business.ownerUserId === "object" && business.ownerUserId.email
+    ? business.ownerUserId
+    : null;
+  if (populated?._id && lookup?.byId?.get(String(populated._id))) {
+    return lookup.byId.get(String(populated._id));
+  }
+  const ownerId = String(business.ownerUserId?._id || business.ownerUserId || "");
+  return (
+    lookup?.byId?.get(ownerId) ||
+    lookup?.byEmail?.get(String(business.sellerContactEmail || "").toLowerCase()) ||
+    populated ||
+    null
+  );
+};
+
 const listServices = async (req, res) => {
   try {
     const provider = await resolveProviderOwnerId(req.query);
@@ -142,33 +216,21 @@ const listServices = async (req, res) => {
 
     const filter = buildAdminServiceFilter(req.query, provider.ownerUserId);
     const services = await Hotel.find(filter)
-      .populate("ownerUserId", "name email sellerId")
+      .populate("ownerUserId", PROVIDER_DETAIL_SELECT)
       .sort({ createdAt: -1 })
       .lean();
 
     const providers = await User.find({ role: { $in: ["hotel", "supplier"] } })
-      .select("name email sellerId")
+      .select("name email phone sellerId")
       .sort({ name: 1 })
       .lean();
+    const lookup = await loadProvidersForBusinesses(services);
 
     return res.json({
-      services: services.map((business) => ({
-        ...business,
-        title: business.name,
-        category: business.type,
-        businessId: business,
-        availableQuantity: business.quantityRemaining ?? business.availableQuantity ?? 0,
-        verificationStatus: business.approvalStatus,
-        provider: business.ownerUserId
-          ? {
-              id: business.ownerUserId._id,
-              name: business.ownerUserId.name,
-              email: business.ownerUserId.email,
-              sellerId: business.ownerUserId.sellerId,
-            }
-          : null,
-      })),
-      providers,
+      services: services.map((business) =>
+        serializeAdminServiceListItem(business, providerForBusiness(business, lookup))
+      ),
+      providers: providers.map((user) => serializeProvider(user)),
       filters: {
         providerId: provider.applied ? String(provider.ownerUserId || "") : "",
         sellerId: String(req.query.sellerId || "").trim(),
@@ -183,16 +245,40 @@ const listServices = async (req, res) => {
   }
 };
 
+const getServiceDetail = async (req, res) => {
+  try {
+    const serviceId = req.params.serviceId || req.params.businessId;
+    const business = await Hotel.findById(serviceId).lean();
+    if (!business) return res.status(404).json({ message: "Service not found." });
+
+    const [provider, serviceOptions] = await Promise.all([
+      loadProviderForBusiness(business),
+      HotelService.find({ hotelId: business._id }).sort({ createdAt: 1 }).lean(),
+    ]);
+
+    const service = serializeAdminServiceDetail(business, { provider, serviceOptions });
+    return res.json({
+      service,
+      business: service,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to fetch service details.", error: error.message });
+  }
+};
+
 const updateBusinessVerification = async (req, res) => {
   try {
-    const { businessId } = req.params;
-    const requestedStatus = req.body.status || req.body.verificationStatus;
-    const approvalStatus =
-      requestedStatus === "verified" || requestedStatus === "approved"
-        ? "approved"
-        : requestedStatus === "rejected"
-          ? "rejected"
-          : "pending";
+    const businessId = req.params.businessId || req.params.serviceId;
+    const approvalStatus = resolveApprovalStatus({
+      body: req.body,
+      path: req.path || req.originalUrl || "",
+      query: req.query,
+    });
+    if (!approvalStatus) {
+      return res.status(400).json({
+        message: "Send status as approved or rejected.",
+      });
+    }
     const commissionPercentage = Math.max(0, Math.min(100, Number(req.body.commissionPercentage ?? 5)));
 
     const business = await Hotel.findByIdAndUpdate(
@@ -201,6 +287,7 @@ const updateBusinessVerification = async (req, res) => {
         $set: {
           approvalStatus,
           ...(approvalStatus === "approved" ? { status: "available", commissionPercentage } : {}),
+          ...(approvalStatus === "rejected" ? { status: "unavailable" } : {}),
         },
         ...(approvalStatus === "approved"
           ? { $max: { availableQuantity: 1, quantityRemaining: 1 } }
@@ -208,7 +295,7 @@ const updateBusinessVerification = async (req, res) => {
       },
       { returnDocument: "after", runValidators: true }
     );
-    if (!business) return res.status(404).json({ message: "Business not found." });
+    if (!business) return res.status(404).json({ message: "Service not found." });
     if (approvalStatus === "approved") {
       try {
         await business.populate("ownerUserId", "name email");
@@ -234,12 +321,20 @@ const updateBusinessVerification = async (req, res) => {
     });
     clearCache("public:");
 
+    const provider = await loadProviderForBusiness(business);
+    const service = serializeAdminServiceDetail(business, { provider });
     return res.json({
-      message: approvalStatus === "approved" ? "Business posted publicly." : "Business review updated.",
-      business,
+      message:
+        approvalStatus === "approved"
+          ? "Service approved and posted publicly."
+          : approvalStatus === "rejected"
+            ? "Service rejected."
+            : "Service review updated.",
+      service,
+      business: service,
     });
   } catch (error) {
-    return res.status(500).json({ message: "Failed to update business approval.", error: error.message });
+    return res.status(500).json({ message: "Failed to update service approval.", error: error.message });
   }
 };
 
@@ -473,10 +568,11 @@ const updateMarketplaceSettings = async (req, res) => {
 
 const updateServiceBookingMode = async (req, res) => {
   try {
+    const businessId = req.params.businessId || req.params.serviceId;
     const bookingMode = req.body.bookingMode === "automatic" ? "automatic" : "manual";
     let automaticTable = null;
     if (bookingMode === "automatic") {
-      const current = await Hotel.findById(req.params.businessId);
+      const current = await Hotel.findById(businessId);
       if (!current) return res.status(404).json({ message: "Service not found." });
       const rows = current.availabilityTable?.rows || [];
       const defaults = getAutomaticRuleDefaults(current.type);
@@ -514,7 +610,7 @@ const updateServiceBookingMode = async (req, res) => {
       };
     }
     const business = await Hotel.findByIdAndUpdate(
-      req.params.businessId,
+      businessId,
       { $set: { bookingMode, ...(automaticTable ? { availabilityTable: automaticTable } : {}) } },
       { returnDocument: "after", runValidators: true }
     );
@@ -1480,6 +1576,7 @@ module.exports = {
   createSeller,
   updateAnnouncement,
   listServices,
+  getServiceDetail,
   updateBusinessVerification,
   approveBooking,
   rejectBooking,
