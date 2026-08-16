@@ -13,9 +13,6 @@ const DEFAULT_ADMIN = {
 };
 
 const SEEDED_NON_ADMIN_EMAILS = [
-  "eric.helper@safarisconn.com",
-  "diane.helper@safarisconn.com",
-  "john.helper@safarisconn.com",
 ];
 
 const seedAdmin = async () => {
