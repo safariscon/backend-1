@@ -19,11 +19,11 @@ const SEEDED_NON_ADMIN_EMAILS = [
 ];
 
 const seedAdmin = async () => {
-  const adminEmail = (process.env.SEED_ADMIN_EMAIL || DEFAULT_ADMIN.email)
+  const adminEmail = (process.env.SEED_ADMIN_EMAIL || process.env.ADMIN_EMAIL || DEFAULT_ADMIN.email)
     .toLowerCase()
     .trim();
-  const adminName = (process.env.SEED_ADMIN_NAME || DEFAULT_ADMIN.name).trim();
-  const adminPassword = process.env.SEED_ADMIN_PASSWORD || DEFAULT_ADMIN.password;
+  const adminName = (process.env.SEED_ADMIN_NAME || process.env.ADMIN_NAME || DEFAULT_ADMIN.name).trim();
+  const adminPassword = process.env.SEED_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || DEFAULT_ADMIN.password;
 
   const existing = await User.findOne({ email: adminEmail });
   const hashedPassword = await bcrypt.hash(adminPassword, 10);

@@ -124,6 +124,58 @@ const formatCustomerLocation = (details) =>
     "Rwanda",
   ].filter(Boolean).join(", ");
 
+const findSelectedServiceOption = (business, body = {}, details = {}) => {
+  const rows = (business?.availabilityTable?.rows || []).map(normalizePriceOption);
+  const optionId = String(
+    details.selectedOptionId || body.selectedOptionId || details.optionId || body.optionId || ""
+  ).trim();
+  const optionName = String(
+    details.requestedService || details.optionName || body.requestedService || body.optionName || ""
+  ).trim();
+  if (optionId) return rows.find((option) => option.id === optionId) || null;
+  if (optionName) return rows.find((option) => option.name === optionName) || null;
+  return null;
+};
+
+const buildPriceSnapshot = ({
+  selectedOption,
+  automaticQuote,
+  bookingPeople,
+  bookingQuantity,
+  totalConsumptionUnits,
+}) => {
+  if (!selectedOption) return null;
+  if (automaticQuote) {
+    return {
+      ...selectedOption,
+      availabilityAtBooking: selectedOption.availability,
+      bookingDuration: 1,
+      numberOfPeople: automaticQuote.people,
+      quantity: automaticQuote.quantity,
+      totalConsumptionUnits: automaticQuote.totalConsumptionUnits,
+      totalPrice: automaticQuote.total,
+      originalPrice: automaticQuote.originalPrice,
+      promotionApplied: automaticQuote.promotionApplied,
+      promotionTitle: automaticQuote.promotionTitle,
+      promotionPercent: automaticQuote.promotionPercent,
+      discountAmount: automaticQuote.discountAmount,
+      finalPrice: automaticQuote.finalPrice,
+      depositPercent: automaticQuote.depositPercent,
+      depositAmount: automaticQuote.deposit,
+      remainingBalance: automaticQuote.remaining,
+      paymentReason: automaticQuote.reason,
+    };
+  }
+  return {
+    ...selectedOption,
+    availabilityAtBooking: selectedOption.availability,
+    numberOfPeople: bookingPeople,
+    quantity: bookingQuantity,
+    totalConsumptionUnits,
+    totalPrice: 0,
+  };
+};
+
 const resolveBookingActionDeadline = (booking) => {
   const details = booking?.bookingDetails || {};
   const value = details.bookingDate || details.startDate || details.pickupDate || booking?.checkIn;
@@ -370,13 +422,7 @@ const createBookingRequest = async (req, res) => {
     let bookingStatus = "pending";
     let paymentStatus = "unpaid";
     if (selectedBusiness) {
-      selectedOption = (selectedBusiness.availabilityTable?.rows || [])
-        .map(normalizePriceOption)
-        .find((option) =>
-          option.id === rawDetails.selectedOptionId ||
-          option.id === req.body.selectedOptionId ||
-          option.name === rawDetails.requestedService
-        ) || null;
+      selectedOption = findSelectedServiceOption(selectedBusiness, req.body, rawDetails);
     }
 
     const schedule = validateBookingSchedule({
@@ -511,30 +557,20 @@ const createBookingRequest = async (req, res) => {
         requestedAt: selectedBusiness ? new Date() : null,
       },
       serviceOptionId: selectedOption?.id || "",
-      priceSnapshot: selectedOption ? {
-        ...selectedOption,
-        availabilityAtBooking: selectedOption.availability,
-        bookingDuration: 1,
-        numberOfPeople: automaticQuote.people,
-        quantity: automaticQuote.quantity,
-        totalConsumptionUnits: automaticQuote.totalConsumptionUnits,
-        totalPrice: automaticQuote.total,
-        originalPrice: automaticQuote.originalPrice,
-        promotionApplied: automaticQuote.promotionApplied,
-        promotionTitle: automaticQuote.promotionTitle,
-        promotionPercent: automaticQuote.promotionPercent,
-        discountAmount: automaticQuote.discountAmount,
-        finalPrice: automaticQuote.finalPrice,
-        depositPercent: automaticQuote.depositPercent,
-        depositAmount: automaticQuote.deposit,
-        remainingBalance: automaticQuote.remaining,
-        paymentReason: automaticQuote.reason,
-      } : null,
-      availabilityReservation: selectedOption ? {
-        status: "reserved",
-        quantity: reservedQuantity,
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
-      } : undefined,
+      priceSnapshot: buildPriceSnapshot({
+        selectedOption,
+        automaticQuote,
+        bookingPeople,
+        bookingQuantity,
+        totalConsumptionUnits,
+      }),
+      availabilityReservation: automaticQuote && selectedOption
+        ? {
+            status: "reserved",
+            quantity: reservedQuantity,
+            expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+          }
+        : undefined,
       commissionPercentage: selectedBusiness ? resolveCommissionPercentage(selectedBusiness) : 0,
       commissionAmount: automaticQuote
         ? Math.round((Number(automaticQuote.total || 0) * resolveCommissionPercentage(selectedBusiness)) / 100)

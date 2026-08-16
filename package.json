@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
+    "lint": "node scripts/lint.js",
     "seed-admin": "node src/utils/seedAdmin.js",
     "migrate:images": "node src/utils/migrateImagesToCloudinary.js",
     "verify:images": "node src/utils/verifyImageStorage.js",
@@ -15,6 +16,9 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
     "bcrypt": "^6.0.0",
     "cloudinary": "^2.10.0",

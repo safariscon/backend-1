@@ -1,0 +1,39 @@
+name: safariscon-api
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: safariscon-api:latest
+    container_name: safariscon-api
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 10000
+      REQUIRE_DB_ON_STARTUP: "true"
+      SEED_ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      SEED_ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SEED_ADMIN_NAME: ${ADMIN_NAME:-}
+    ports:
+      - "${PORT:-10000}:10000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:10000/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

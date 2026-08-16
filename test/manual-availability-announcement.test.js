@@ -124,3 +124,69 @@ test("booking stores the promotion that was active when the customer booked", as
   assert.equal(createdBooking.promotionSnapshot.percent, 25);
   assert.match(createdBooking.promotionSnapshot.note, /happy hour/i);
 });
+
+test("manual booking with a selected option does not crash when there is no automatic quote", async (context) => {
+  const originalFindOne = Hotel.findOne;
+  const originalCountDocuments = Hotel.countDocuments;
+  const originalCreate = Booking.create;
+  let createdBooking = null;
+  Hotel.findOne = async () => ({
+    _id: "6a801e8b33074243a4c093f2",
+    type: "hotel-rooms",
+    name: "Theoneste Hotel service",
+    bookingMode: "manual",
+    approvalStatus: "approved",
+    status: "available",
+    availabilityTable: {
+      rows: [
+        {
+          id: "room_option",
+          cells: { service: "Standard room", price: 50000, availability: 5 },
+        },
+      ],
+    },
+  });
+  Hotel.countDocuments = async () => 1;
+  Booking.create = async (data) => {
+    createdBooking = { ...data, _id: "booking-manual-1" };
+    return createdBooking;
+  };
+  context.after(() => {
+    Hotel.findOne = originalFindOne;
+    Hotel.countDocuments = originalCountDocuments;
+    Booking.create = originalCreate;
+  });
+
+  const result = response();
+  await createBookingRequest({
+    user: { _id: "507f1f77bcf86cd799439011", role: "customer" },
+    body: {
+      hotelId: "6a801e8b33074243a4c093f2",
+      quantity: 1,
+      numberOfPeople: 1,
+      guests: 1,
+      bookingDate: "2026-08-17",
+      endBookingDate: "2026-08-19",
+      checkIn: "2026-08-17",
+      checkOut: "2026-08-19",
+      startTime: "11:44",
+      endTime: "11:48",
+      totalPrice: 0,
+      destinationPlace: "Hotel 1",
+      destinationLocation: "Rubavu",
+      customerLocation: "Bugu, RRukoko, rubavu, Rubavu, Eastern Province, Rwanda",
+      customerLocationDetails,
+      bookingDetails: {
+        selectedOptionId: "room_option",
+        requestedService: "Standard room",
+      },
+    },
+  }, result);
+
+  assert.equal(result.statusCode, 201, result.body?.error || result.body?.message);
+  assert.equal(createdBooking.bookingMode, "manual");
+  assert.equal(createdBooking.status, "pending");
+  assert.equal(createdBooking.priceSnapshot.numberOfPeople, 1);
+  assert.equal(createdBooking.priceSnapshot.totalPrice, 0);
+  assert.equal(createdBooking.availabilityReservation, undefined);
+});
