@@ -7,7 +7,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { normalizePayoutDetails, normalizeCustomerPaymentDetails } = require("../src/utils/payoutDetails");
 const { splitCollectedAmount, getPlatformCommissionPercentage, resolveCommissionPercentage } = require("../src/utils/commission");
-const { getXentripayConfig, initiateCollection, initiatePayout } = require("../src/services/xentripayService");
+const { getXentripayConfig, initiateCollection, initiatePayout, toClientPaymentError } = require("../src/services/xentripayService");
 
 test("platform commission rate 0.12 becomes 12 percent", () => {
   assert.equal(getPlatformCommissionPercentage(), 12);
@@ -99,4 +99,41 @@ test("placeholder XentriPay key stays in simulation mode", async () => {
   });
   assert.equal(payout.simulated, true);
   assert.equal(payout.status, "PENDING");
+});
+
+test("missing XentriPay key does not fake a live MoMo prompt", async () => {
+  const previousKey = process.env.XENTRIPAY_API_KEY;
+  const previousSimulate = process.env.XENTRIPAY_SIMULATE_SUCCESS;
+  process.env.XENTRIPAY_API_KEY = "";
+  process.env.XENTRIPAY_SIMULATE_SUCCESS = "false";
+  try {
+    await assert.rejects(
+      () =>
+        initiateCollection({
+          email: "guest@example.com",
+          cname: "Guest User",
+          cnumber: "0780371519",
+          msisdn: "250780371519",
+          amount: 3000,
+          pmethod: "momo",
+          customerRef: "PAY-LIVE-TEST",
+          details: "test",
+        }),
+      (error) => error.status === 503 && /backend \.env/i.test(error.message)
+    );
+  } finally {
+    process.env.XENTRIPAY_API_KEY = previousKey;
+    process.env.XENTRIPAY_SIMULATE_SUCCESS = previousSimulate;
+  }
+});
+
+test("XentriPay 401 is mapped to 502 so the customer is not logged out", () => {
+  const mapped = toClientPaymentError({
+    status: 401,
+    message: "Unauthorized",
+    code: "PAYMENT_GATEWAY_ERROR",
+  });
+  assert.equal(mapped.status, 502);
+  assert.equal(mapped.code, "PAYMENT_GATEWAY_UNAUTHORIZED");
+  assert.match(mapped.message, /still signed in/i);
 });

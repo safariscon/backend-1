@@ -2,9 +2,9 @@ const fs = require("fs");
 const path = require("path");
 const dotenv = require("dotenv");
 
-dotenv.config({ quiet: true });
-
 const envPath = path.resolve(__dirname, "../.env");
+dotenv.config({ path: envPath, quiet: true });
+
 if (fs.existsSync(envPath)) {
   const parsedEnv = dotenv.parse(fs.readFileSync(envPath));
   [
@@ -15,6 +15,18 @@ if (fs.existsSync(envPath)) {
     "JWT_SECRET",
     "ADMIN_EMAIL",
     "ADMIN_PASSWORD",
+    "XENTRIPAY_ENV",
+    "XENTRIPAY_API_KEY",
+    "XENTRIPAY_BASE_URL",
+    "XENTRIPAY_SIMULATE_SUCCESS",
+    "XENTRIPAY_CURRENCY",
+    "XENTRIPAY_MIN_AMOUNT",
+    "XENTRIPAY_CHARGES_INCLUDED",
+    "XENTRIPAY_MERCHANT_NAME",
+    "XENTRIPAY_MERCHANT_EMAIL",
+    "XENTRIPAY_MERCHANT_PHONE",
+    "FRONTEND_URL",
+    "PUBLIC_FRONTEND_URL",
   ].forEach((key) => {
     if (parsedEnv[key] !== undefined) process.env[key] = parsedEnv[key];
   });
@@ -25,6 +37,7 @@ const connectDB = require("./config/db");
 const seedAdmin = require("./utils/seedAdmin");
 const { initRealtime } = require("./utils/realtime");
 const { setDbReady } = require("./middleware/databaseMiddleware");
+const { getXentripayPublicStatus } = require("./services/xentripayService");
 const { runRebookExpiryCleanup } = require("./controllers/rebookController");
 const { runBookingNoActionRefundCleanup, runPendingPaymentSync, runReleasedProviderPayouts } = require("./controllers/bookingController");
 
@@ -106,7 +119,14 @@ const startServer = async () => {
     if (databaseReady) startRebookExpiryCleanup();
 
     server.listen(PORT, () => {
+      const payments = getXentripayPublicStatus();
       console.log(`Server running on port ${PORT}`);
+      console.log(
+        `XentriPay ${payments.configured ? "CONFIGURED" : "NOT CONFIGURED"} (${payments.env}) ${payments.baseUrl}`
+      );
+      if (!payments.configured) {
+        console.warn("MoMo prompts will not reach phones until XENTRIPAY_API_KEY is set in backend .env.");
+      }
     });
   } catch (error) {
     console.error("Failed to start server:", error.message);

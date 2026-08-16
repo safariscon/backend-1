@@ -11,6 +11,7 @@ const paymentRoutes = require("./routes/paymentRoutes");
 const analyticsRoutes = require("./routes/analyticsRoutes");
 const geoRoutes = require("./routes/geoRoutes");
 const { getDbState, requireDatabase } = require("./middleware/databaseMiddleware");
+const { getXentripayPublicStatus } = require("./services/xentripayService");
 
 const app = express();
 
@@ -65,12 +66,14 @@ app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => {
   const database = getDbState();
+  const payments = getXentripayPublicStatus();
   res.json({
     status: database.ready ? "ok" : "degraded",
     service: "safariscon-api",
     time: new Date().toISOString(),
     environment: process.env.NODE_ENV || "development",
     database,
+    payments,
   });
 });
 

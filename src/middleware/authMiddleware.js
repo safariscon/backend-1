@@ -9,23 +9,26 @@ const loadAccessUser = async (req) => {
     : null;
 
   if (!token) {
-    return { status: 401, body: { message: "Unauthorized: token missing." } };
+    return { status: 401, body: { code: "TOKEN_MISSING", message: "Unauthorized: token missing." } };
   }
 
   let decoded;
   try {
     decoded = verifyAuthToken(token);
-  } catch (_error) {
-    return { status: 401, body: { message: "Unauthorized: invalid token." } };
+  } catch (error) {
+    if (error?.name === "TokenExpiredError") {
+      return { status: 401, body: { code: "TOKEN_EXPIRED", message: "Unauthorized: token expired." } };
+    }
+    return { status: 401, body: { code: "AUTH_UNAUTHORIZED", message: "Unauthorized: invalid token." } };
   }
 
   if (!isAccessTokenPayload(decoded)) {
-    return { status: 401, body: { message: "Unauthorized: access token required." } };
+    return { status: 401, body: { code: "AUTH_UNAUTHORIZED", message: "Unauthorized: access token required." } };
   }
 
   const user = await User.findById(decoded.id).select("-password");
   if (!user) {
-    return { status: 401, body: { message: "Unauthorized: user not found." } };
+    return { status: 401, body: { code: "AUTH_UNAUTHORIZED", message: "Unauthorized: user not found." } };
   }
 
   return { user };
@@ -51,7 +54,7 @@ const createProtect =
       req.user = result.user;
       next();
     } catch (_error) {
-      return res.status(401).json({ message: "Unauthorized: invalid token." });
+      return res.status(401).json({ code: "AUTH_UNAUTHORIZED", message: "Unauthorized: invalid token." });
     }
   };
 

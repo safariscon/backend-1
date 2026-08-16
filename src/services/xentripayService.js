@@ -5,11 +5,18 @@ const mailerBoolean = (value, fallback = true) => {
   return !["false", "0", "no"].includes(String(value).trim().toLowerCase());
 };
 
+const sanitizeApiKey = (value) =>
+  String(value || "")
+    .replace(/^\uFEFF/, "")
+    .trim()
+    .replace(/^["']|["']$/g, "")
+    .trim();
+
 const getXentripayConfig = () => {
   const env = String(process.env.XENTRIPAY_ENV || "test").trim().toLowerCase();
   const defaultBase =
     env === "production" ? "https://xentripay.com" : "https://merchant.test.xentripay.com";
-  const apiKey = String(process.env.XENTRIPAY_API_KEY || "").trim();
+  const apiKey = sanitizeApiKey(process.env.XENTRIPAY_API_KEY);
   const placeholderKey = !apiKey || /^(your_xentripay_api_key|replace_me|changeme|xxx)$/i.test(apiKey);
   const baseUrl = String(process.env.XENTRIPAY_BASE_URL || defaultBase).replace(/\/+$/, "");
   const simulateSuccess = mailerBoolean(process.env.XENTRIPAY_SIMULATE_SUCCESS, false);
@@ -32,7 +39,34 @@ const getXentripayConfig = () => {
   };
 };
 
-const isSimulation = () => !getXentripayConfig().configured;
+const isSimulation = () => {
+  const config = getXentripayConfig();
+  return !config.configured && config.simulateSuccess;
+};
+
+const requireLiveGatewayOrSimulate = () => {
+  const config = getXentripayConfig();
+  if (config.configured) return { config, simulate: false };
+  if (config.simulateSuccess) return { config, simulate: true };
+  const error = new Error(
+    "Mobile Money is not live on the server. Put XENTRIPAY_API_KEY in the backend .env (not the frontend), set XENTRIPAY_SIMULATE_SUCCESS=false, and restart the API."
+  );
+  error.status = 503;
+  error.code = "XENTRIPAY_NOT_CONFIGURED";
+  throw error;
+};
+
+const getXentripayPublicStatus = () => {
+  const config = getXentripayConfig();
+  return {
+    provider: "xentripay",
+    env: config.env,
+    configured: config.configured,
+    simulated: !config.configured,
+    simulateSuccess: config.simulateSuccess,
+    baseUrl: config.baseUrl,
+  };
+};
 
 const xentripayRequest = async (method, path, body) => {
   const config = getXentripayConfig();
@@ -62,7 +96,16 @@ const xentripayRequest = async (method, path, body) => {
   if (!response.ok) {
     const error = new Error(payload?.message || `XentriPay request failed (${response.status}).`);
     error.status = response.status;
+    error.code = "PAYMENT_GATEWAY_ERROR";
     error.payload = payload;
+    if (response.status === 401 || response.status === 403) {
+      const detail =
+        payload?.message || payload?.error || payload?.raw || JSON.stringify(payload || {});
+      const suffix = config.apiKey.slice(-4);
+      console.warn(
+        `XentriPay ${response.status} on ${method} ${path}. Invalid or disabled API key for ${config.baseUrl} (${config.env}), key …${suffix}. Customer login is unrelated. Gateway said: ${detail}. If the XentriPay business Environment is LIVE, use XENTRIPAY_ENV=production and XENTRIPAY_BASE_URL=https://xentripay.com with a LIVE dashboard key. A TEST key only works on https://merchant.test.xentripay.com.`
+      );
+    }
     throw error;
   }
 
@@ -106,14 +149,14 @@ const initiateCollection = async ({
     email,
     cname,
     amount: wholeAmount,
-    cnumber,
-    msisdn,
+    cnumber: String(cnumber || "").trim(),
+    msisdn: String(msisdn || "").trim(),
     currency: config.currency,
     pmethod,
     chargesIncluded: config.chargesIncluded,
-    customerRef,
-    details,
   };
+  if (customerRef) payload.customerRef = customerRef;
+  if (details) payload.details = details;
 
   if (pmethod === "cc") {
     payload.redirecturl = redirecturl || config.collectionRedirectUrl;
@@ -129,6 +172,7 @@ const initiateCollection = async ({
     return simulateCollection({ customerRef, pmethod, amount: wholeAmount });
   }
 
+  requireLiveGatewayOrSimulate();
   return xentripayRequest("POST", "/api/collections/initiate", payload);
 };
 
@@ -143,6 +187,7 @@ const getCollectionStatus = async (reference) => {
     };
   }
 
+  requireLiveGatewayOrSimulate();
   return xentripayRequest("GET", `/api/collections/status/${encodeURIComponent(reference)}`);
 };
 
@@ -190,6 +235,7 @@ const initiatePayout = async ({
     };
   }
 
+  requireLiveGatewayOrSimulate();
   return xentripayRequest("POST", "/api/payment-requests", payload);
 };
 
@@ -274,8 +320,43 @@ const normalizePayoutStatus = (status) => {
   return "pending";
 };
 
+const toClientPaymentError = (error = {}) => {
+  if (error.code === "XENTRIPAY_NOT_CONFIGURED") {
+    return {
+      status: 503,
+      code: "XENTRIPAY_NOT_CONFIGURED",
+      message: error.message,
+    };
+  }
+
+  const upstream = Number(error.status || 0);
+  if (upstream === 401 || upstream === 403) {
+    return {
+      status: 502,
+      code: "PAYMENT_GATEWAY_UNAUTHORIZED",
+      message:
+        "XentriPay rejected the API key (invalid or disabled for this environment). You are still signed in. Use the key from the same dashboard as XENTRIPAY_BASE_URL: TEST key → merchant.test.xentripay.com, LIVE key → https://xentripay.com.",
+    };
+  }
+
+  if (upstream >= 500 || !upstream) {
+    return {
+      status: 502,
+      code: error.code || "PAYMENT_GATEWAY_ERROR",
+      message: error.message || "Payment provider is unavailable. You are still signed in.",
+    };
+  }
+
+  return {
+    status: upstream,
+    code: error.code || "PAYMENT_FAILED",
+    message: error.message || "Payment failed.",
+  };
+};
+
 module.exports = {
   getXentripayConfig,
+  getXentripayPublicStatus,
   isSimulation,
   initiateCollection,
   getCollectionStatus,
@@ -286,4 +367,5 @@ module.exports = {
   getCheckoutStatus,
   normalizeCollectionStatus,
   normalizePayoutStatus,
+  toClientPaymentError,
 };

@@ -62,6 +62,41 @@ const paragraphHtml = (lines) =>
     .map((line) => `<p style="margin:0 0 12px;color:#1f2937;line-height:1.5;">${escapeHtml(line)}</p>`)
     .join("");
 
+const formatRwfs = (amount) => `RWF ${Number(amount || 0).toLocaleString("en-US")}`;
+
+const isDeliverableEmail = (email) => {
+  const value = String(email || "").trim().toLowerCase();
+  if (!value || !value.includes("@")) return false;
+  return !/@seller\.local$|@business\.local$/i.test(value);
+};
+
+const detailsTableHtml = (rows = []) => {
+  const cells = rows
+    .filter((row) => row?.label && String(row.value || "").trim())
+    .map(
+      (row) => `
+        <tr>
+          <td style="padding:8px 12px;color:#6b7280;vertical-align:top;width:38%;">${escapeHtml(row.label)}</td>
+          <td style="padding:8px 12px;color:#111827;font-weight:600;">${escapeHtml(row.value)}</td>
+        </tr>`
+    )
+    .join("");
+  if (!cells) return "";
+  return `<table style="width:100%;border-collapse:collapse;background:#f9fafb;border-radius:8px;margin:16px 0;">${cells}</table>`;
+};
+
+const ctaButtonHtml = (href, label) =>
+  href
+    ? `<p style="margin:24px 0 8px;">
+        <a href="${escapeHtml(href)}" style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:700;">
+          ${escapeHtml(label)}
+        </a>
+      </p>`
+    : "";
+
+const bookingModeLabel = (mode) =>
+  String(mode || "").toLowerCase() === "automatic" ? "Automatic" : "Manual";
+
 const otpHtml = ({ title, name, otp, expiresInMinutes, purpose }) => `
   <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;">
     <h2 style="margin:0 0 16px;color:#111827;">${escapeHtml(title)}</h2>
@@ -227,29 +262,157 @@ const sendServiceProviderBookingRequestEmail = async ({
   serviceProviderName,
   businessName,
   bookingId,
-}) =>
-  sendMail({
+  bookingCode,
+  bookingMode,
+  customerName,
+  customerLocation,
+  serviceCategory,
+  optionName,
+  bookingDate,
+  endBookingDate,
+  startTime,
+  endTime,
+  guests,
+  numberOfPeople,
+  quantity,
+  totalPrice,
+  specialRequests,
+  dashboardUrl,
+}) => {
+  const isAutomatic = String(bookingMode || "").toLowerCase() === "automatic";
+  const mode = bookingModeLabel(bookingMode);
+  const nextSteps = isAutomatic
+    ? [
+        "This booking used automatic pricing. You do not need to approve a quote.",
+        "Open your bookings page, confirm the reserved option and dates, then wait for the customer to pay in SafarisCon.",
+        "After payment, customer contact details unlock so you can deliver the service.",
+      ]
+    : [
+        "This is a manual booking request. Review the dates, option, and guest count, then approve or reject it in your dashboard.",
+        "If you approve, set the price (if needed). The customer will then pay in SafarisCon.",
+        "Do not share your phone number or exact location outside the app. Contacts unlock after the customer pays.",
+      ];
+  const rows = [
+    { label: "Booking ID", value: bookingCode || bookingId },
+    { label: "Booking type", value: `${mode} booking` },
+    { label: "Service", value: businessName },
+    { label: "Category", value: serviceCategory },
+    { label: "Option", value: optionName },
+    { label: "Customer", value: customerName },
+    { label: "Customer area", value: customerLocation },
+    { label: "Start date", value: bookingDate },
+    { label: "End date", value: endBookingDate && endBookingDate !== bookingDate ? endBookingDate : "" },
+    { label: "Time", value: startTime && endTime ? `${startTime} – ${endTime}` : startTime || endTime },
+    { label: "Guests", value: numberOfPeople || guests },
+    { label: "Quantity", value: quantity },
+    { label: "Quoted total", value: isAutomatic && totalPrice ? formatRwfs(totalPrice) : "" },
+    { label: "Special requests", value: specialRequests },
+  ];
+  const openLabel = "Open seller bookings";
+
+  return sendMail({
     to: serviceProviderEmail,
-    subject: "New SafarisCon booking request needs approval",
+    subject: isAutomatic
+      ? `New automatic booking for ${businessName || "your service"}`
+      : `New booking request needs your review: ${businessName || "your service"}`,
     text: [
       `Hello ${serviceProviderName || "service provider"},`,
-      `A customer requested ${businessName || "your service"}.`,
-      `Booking ID: ${bookingId}`,
-      "Review the request in your SafarisCon dashboard. Customer contact details stay hidden until payment is completed in the system.",
+      `A customer booked ${businessName || "your service"} (${mode.toLowerCase()}).`,
+      ...rows.filter((row) => row.value).map((row) => `${row.label}: ${row.value}`),
+      ...nextSteps,
+      dashboardUrl ? `Open bookings (sign in first if needed): ${dashboardUrl}` : "Open your SafarisCon seller bookings page.",
     ].join("\n\n"),
     html: `
-      <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;">
-        <h2 style="margin:0 0 16px;color:#111827;">New booking request</h2>
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;">
+        <h2 style="margin:0 0 16px;color:#111827;">${isAutomatic ? "New automatic booking" : "New booking request"}</h2>
         ${paragraphHtml([
           `Hello ${serviceProviderName || "service provider"},`,
-          `A customer requested ${businessName || "your service"}.`,
-          `Booking ID: ${bookingId}`,
-          "Review the request in your SafarisCon dashboard. Customer contact details stay hidden until payment is completed in the system.",
+          `A customer booked ${businessName || "your service"}.`,
         ])}
+        ${detailsTableHtml(rows)}
+        ${paragraphHtml(nextSteps)}
+        ${ctaButtonHtml(dashboardUrl, openLabel)}
+        ${dashboardUrl ? `<p style="margin:0;color:#6b7280;font-size:13px;">If you are not signed in, you will log in first and then return to your bookings page.</p>` : ""}
       </div>
     `,
-    simulationMessage: `Sent manual booking request email to service provider ${serviceProviderEmail} for booking ${bookingId}.`,
+    simulationMessage: `Sent ${mode.toLowerCase()} booking email to seller ${serviceProviderEmail} for booking ${bookingId}.`,
   });
+};
+
+const sendCustomerBookingReceivedEmail = async ({
+  customerEmail,
+  customerName,
+  businessName,
+  bookingId,
+  bookingCode,
+  bookingMode,
+  optionName,
+  bookingDate,
+  endBookingDate,
+  startTime,
+  endTime,
+  guests,
+  numberOfPeople,
+  quantity,
+  totalPrice,
+  dashboardUrl,
+  paymentUrl,
+}) => {
+  const isAutomatic = String(bookingMode || "").toLowerCase() === "automatic";
+  const mode = bookingModeLabel(bookingMode);
+  const nextSteps = isAutomatic
+    ? [
+        "Your quote is ready. Pay in SafarisCon to confirm the booking and unlock the provider details.",
+        "Availability is held for a short time. Complete payment soon so the reservation is not released.",
+      ]
+    : [
+        "The service provider will review this request. You will get another email when they approve it.",
+        "After approval, pay in SafarisCon. Provider contact and the exact location unlock after payment.",
+      ];
+  const rows = [
+    { label: "Booking ID", value: bookingCode || bookingId },
+    { label: "Booking type", value: `${mode} booking` },
+    { label: "Service", value: businessName },
+    { label: "Option", value: optionName },
+    { label: "Start date", value: bookingDate },
+    { label: "End date", value: endBookingDate && endBookingDate !== bookingDate ? endBookingDate : "" },
+    { label: "Time", value: startTime && endTime ? `${startTime} – ${endTime}` : startTime || endTime },
+    { label: "Guests", value: numberOfPeople || guests },
+    { label: "Quantity", value: quantity },
+    { label: "Amount to pay", value: isAutomatic && totalPrice ? formatRwfs(totalPrice) : "Set after provider approval" },
+  ];
+
+  return sendMail({
+    to: customerEmail,
+    subject: isAutomatic
+      ? `Your ${businessName || "SafarisCon"} quote is ready`
+      : `We received your booking request for ${businessName || "a SafarisCon service"}`,
+    text: [
+      `Hello ${customerName || "there"},`,
+      `Your booking for ${businessName || "the requested service"} was received.`,
+      ...rows.filter((row) => row.value).map((row) => `${row.label}: ${row.value}`),
+      ...nextSteps,
+      dashboardUrl ? `View your bookings (sign in first if needed): ${dashboardUrl}` : "",
+      paymentUrl ? `Pay now: ${paymentUrl}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;">
+        <h2 style="margin:0 0 16px;color:#111827;">${isAutomatic ? "Your quote is ready" : "Booking request received"}</h2>
+        ${paragraphHtml([
+          `Hello ${customerName || "there"},`,
+          `Your booking for ${businessName || "the requested service"} was received.`,
+        ])}
+        ${detailsTableHtml(rows)}
+        ${paragraphHtml(nextSteps)}
+        ${ctaButtonHtml(paymentUrl || dashboardUrl, paymentUrl ? "Pay now" : "View my bookings")}
+        ${dashboardUrl ? `<p style="margin:0;color:#6b7280;font-size:13px;">If you are not signed in, you will log in first and then open your bookings page.</p>` : ""}
+      </div>
+    `,
+    simulationMessage: `Sent ${mode.toLowerCase()} booking confirmation to customer ${customerEmail} for booking ${bookingId}.`,
+  });
+};
 
 const sendManualBookingApprovedEmail = async ({
   customerEmail,
@@ -322,9 +485,11 @@ const sendBusinessApprovedEmail = async ({
 module.exports = {
   sendProviderOnboardingEmail,
   sendServiceProviderBookingRequestEmail,
+  sendCustomerBookingReceivedEmail,
   sendManualBookingApprovedEmail,
   sendBusinessApprovedEmail,
   sendEmailVerificationOtp,
   sendPasswordResetOtp,
   sendLoginOtp,
+  isDeliverableEmail,
 };

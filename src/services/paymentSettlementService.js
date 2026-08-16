@@ -62,6 +62,9 @@ const startCollection = async ({
     redirecturl,
     returl,
   });
+  console.info(
+    `XentriPay collection ${collection.simulated ? "SIMULATED" : "LIVE"} ref=${customerRef} amount=${amount} msisdn=${paymentDetails.msisdn}`
+  );
 
   if (Number(collection.success) === 0 || Number(collection.retcode || 0) !== 0) {
     const error = new Error(collection.reply || "XentriPay rejected the collection request.");
@@ -90,7 +93,7 @@ const startCollection = async ({
     collectionTid: collection.tid || "",
     collectionAuthKey: collection.authkey || "",
     collectionStatus: "pending",
-    checkoutUrl: collection.url || "",
+    checkoutUrl: String(collection.url || "").trim(),
     platformAmount: split.platformAmount,
     providerAmount: split.providerAmount,
     commissionPercentage: split.commissionPercentage,
@@ -241,6 +244,35 @@ const refreshPayout = async (transaction) => {
 const findLatestTransaction = (bookingId) =>
   Transaction.findOne({ bookingId }).sort({ createdAt: -1 });
 
+const hasAcceptedGatewayCollection = (transaction) => {
+  if (!transaction || transaction.status !== "pending") return false;
+  if (transaction.gatewayRaw?.simulated) return false;
+  const success = Number(transaction.gatewayRaw?.success);
+  const retcode = Number(transaction.gatewayRaw?.retcode);
+  return Boolean(transaction.collectionTid) && success === 1 && retcode === 0;
+};
+
+const COLLECTION_REUSE_WINDOW_MS = 90 * 1000;
+
+const isReusablePendingCollection = (transaction) => {
+  if (!hasAcceptedGatewayCollection(transaction)) return false;
+  const created = new Date(transaction.createdAt).getTime();
+  return Number.isFinite(created) && Date.now() - created < COLLECTION_REUSE_WINDOW_MS;
+};
+
+const abandonStaleCollection = async (transaction, reason) => {
+  if (!transaction) return null;
+  transaction.status = "failed";
+  transaction.collectionStatus = "failed";
+  transaction.gatewayRaw = {
+    ...(transaction.gatewayRaw || {}),
+    abandonedAt: new Date().toISOString(),
+    abandonReason: reason,
+  };
+  await transaction.save();
+  return transaction;
+};
+
 const syncPendingCollections = async ({ limit = 25 } = {}) => {
   const pending = await Transaction.find({
     status: "pending",
@@ -251,6 +283,10 @@ const syncPendingCollections = async ({ limit = 25 } = {}) => {
 
   const summary = { checked: pending.length, succeeded: 0, failed: 0, stillPending: 0 };
   for (const transaction of pending) {
+    if (transaction.gatewayRaw?.simulated || !hasAcceptedGatewayCollection(transaction)) {
+      summary.stillPending += 1;
+      continue;
+    }
     try {
       const { status } = await refreshCollection(transaction);
       if (status === "SUCCESS") summary.succeeded += 1;
@@ -271,5 +307,8 @@ module.exports = {
   startCustomerRefundPayout,
   refreshPayout,
   findLatestTransaction,
+  hasAcceptedGatewayCollection,
+  isReusablePendingCollection,
+  abandonStaleCollection,
   syncPendingCollections,
 };

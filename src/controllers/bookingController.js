@@ -11,16 +11,20 @@ const { getPublicLocation, getUnlockedServiceLocation } = require("../utils/serv
 const { storeBookingPdf, getBookingPdfDownloadUrl } = require("../services/bookingPdfStorage");
 const { buildEventData, recordAnalyticsEvent } = require("./analyticsController");
 const { claimRebookId, finalizeRebookIdUse, releaseRebookIdClaim } = require("./rebookController");
-const { sendServiceProviderBookingRequestEmail } = require("../utils/notify");
+const { sendServiceProviderBookingRequestEmail, sendCustomerBookingReceivedEmail, isDeliverableEmail } = require("../utils/notify");
+const { buildSellerBookingsUrl, buildCustomerBookingsUrl } = require("../utils/frontendUrls");
 const { normalizeCustomerPaymentDetails } = require("../utils/payoutDetails");
 const { resolveCommissionPercentage } = require("../utils/commission");
-const { getXentripayConfig } = require("../services/xentripayService");
+const { getXentripayConfig, toClientPaymentError } = require("../services/xentripayService");
 const {
   startCollection,
   refreshCollection,
   startProviderPayout,
   startCustomerRefundPayout,
   findLatestTransaction,
+  hasAcceptedGatewayCollection,
+  isReusablePendingCollection,
+  abandonStaleCollection,
   syncPendingCollections,
 } = require("../services/paymentSettlementService");
 const {
@@ -123,6 +127,81 @@ const formatCustomerLocation = (details) =>
     details.province,
     "Rwanda",
   ].filter(Boolean).join(", ");
+
+const formatBookingDateLabel = (value) => {
+  if (!value) return "";
+  const text = String(value).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : "";
+};
+
+const resolveSellerEmail = (business) => {
+  const candidates = [
+    business?.ownerUserId?.email,
+    business?.sellerContactEmail,
+    business?.ownerEmail,
+  ];
+  return candidates.find((email) => isDeliverableEmail(email)) || "";
+};
+
+const notifyBookingCreated = async ({
+  booking,
+  customer,
+  business,
+  selectedOption,
+  automaticQuote,
+}) => {
+  const bookingId = booking?._id;
+  const mode = booking?.bookingMode || (automaticQuote ? "automatic" : "manual");
+  const details = booking?.bookingDetails || {};
+  const optionName =
+    selectedOption?.name ||
+    details.requestedService ||
+    details.optionName ||
+    details.serviceName ||
+    "";
+  const customerName =
+    details.fullName || customer?.name || "Customer";
+  const customerEmail = details.email || customer?.email || "";
+  const shared = {
+    bookingId,
+    bookingCode: booking?.bookingCode,
+    bookingMode: mode,
+    businessName: business?.name || booking?.destinationPlace || "SafarisCon service",
+    optionName,
+    bookingDate: formatBookingDateLabel(details.bookingDate || details.startDate || booking?.bookingDate),
+    endBookingDate: formatBookingDateLabel(details.endBookingDate || details.endDate || booking?.endBookingDate),
+    startTime: details.startTime || booking?.startTime || "",
+    endTime: details.endTime || booking?.endTime || "",
+    guests: booking?.guests,
+    numberOfPeople: booking?.numberOfPeople,
+    quantity: booking?.quantity,
+    totalPrice: automaticQuote?.finalPrice || automaticQuote?.total || booking?.totalPrice || 0,
+  };
+
+  const sellerEmail = resolveSellerEmail(business);
+  if (sellerEmail) {
+    await sendServiceProviderBookingRequestEmail({
+      ...shared,
+      serviceProviderEmail: sellerEmail,
+      serviceProviderName: business?.ownerUserId?.name || business?.name,
+      serviceCategory: business?.type || "",
+      customerName,
+      customerLocation: booking?.customerLocation || details.customerLocation || "",
+      specialRequests: details.specialRequests || "",
+      dashboardUrl: buildSellerBookingsUrl({ bookingId }),
+    });
+  }
+
+  if (isDeliverableEmail(customerEmail)) {
+    await sendCustomerBookingReceivedEmail({
+      ...shared,
+      customerEmail,
+      customerName,
+      dashboardUrl: buildCustomerBookingsUrl({ bookingId }),
+      paymentUrl: automaticQuote ? buildPaymentUrl(bookingId) : "",
+    });
+  }
+};
 
 const findSelectedServiceOption = (business, body = {}, details = {}) => {
   const rows = (business?.availabilityTable?.rows || []).map(normalizePriceOption);
@@ -650,18 +729,19 @@ const createBookingRequest = async (req, res) => {
         status: booking.status,
       });
     }
-    if (!automaticQuote && selectedBusiness?.ownerUserId) {
-      try {
-        const owner = await selectedBusiness.populate("ownerUserId", "name email");
-        await sendServiceProviderBookingRequestEmail({
-          serviceProviderEmail: owner.ownerUserId?.email || selectedBusiness.sellerContactEmail || selectedBusiness.ownerEmail,
-          serviceProviderName: owner.ownerUserId?.name || selectedBusiness.name,
-          businessName: selectedBusiness.name,
-          bookingId: booking._id,
-        });
-      } catch (emailError) {
-        console.warn("Manual booking service provider email failed:", emailError.message);
+    try {
+      if (selectedBusiness && typeof selectedBusiness.populate === "function" && !selectedBusiness.ownerUserId?.email) {
+        await selectedBusiness.populate("ownerUserId", "name email");
       }
+      await notifyBookingCreated({
+        booking,
+        customer: req.user,
+        business: selectedBusiness,
+        selectedOption,
+        automaticQuote,
+      });
+    } catch (emailError) {
+      console.warn("Booking notification email failed:", emailError.message);
     }
     emitRealtime(REALTIME_EVENTS.BOOKING_CHANGED, {
       action: "created",
@@ -919,24 +999,53 @@ const loadPayableBooking = async (req) => {
   return booking;
 };
 
-const pendingPaymentResponse = ({ booking, transaction, collection, split, amount, exactTotal }) => ({
-  code: "PAYMENT_PENDING",
-  message:
-    collection?.url
-      ? "Card payment started. Redirect the customer to checkoutUrl, then poll payment status."
-      : "Mobile Money payment started. Ask the customer to approve the prompt on their phone, then poll payment status.",
-  booking,
-  transaction,
-  collection: {
-    refid: collection?.refid || transaction.collectionRef,
-    tid: collection?.tid || transaction.collectionTid,
-    url: collection?.url || transaction.checkoutUrl || null,
-    pmethod: transaction.customerPayment?.method || "momo",
-  },
-  split,
-  amount,
-  remainingBalance: Math.max(0, exactTotal - amount),
-});
+const momoApprovalHint = (transaction = {}) => {
+  const phone = transaction.customerPayment?.phone || transaction.senderAccount || "";
+  const digits = String(phone || "").replace(/\D/g, "");
+  const local =
+    digits.length === 12 && digits.startsWith("250")
+      ? `0${digits.slice(3)}`
+      : digits.length === 9 && digits.startsWith("7")
+        ? `0${digits}`
+        : digits;
+  return {
+    phone,
+    msisdn: transaction.customerPayment?.msisdn || "",
+    ussd: /^07[23]/.test(local) ? "*182#" : "*182*7*1#",
+    waitSeconds: 120,
+  };
+};
+
+const pendingPaymentResponse = ({ booking, transaction, collection, split, amount, exactTotal }) => {
+  const simulated = Boolean(collection?.simulated || transaction?.gatewayRaw?.simulated);
+  const checkoutUrl = String(collection?.url || transaction?.checkoutUrl || "").trim() || null;
+  const method = transaction.customerPayment?.method || collection?.pmethod || "momo";
+  const isCard = method === "cc" && Boolean(checkoutUrl);
+  const momo = simulated || isCard ? null : momoApprovalHint(transaction);
+  return {
+    code: simulated ? "PAYMENT_SIMULATED" : "PAYMENT_PENDING",
+    message: simulated
+      ? "This payment was simulated on the server. No Mobile Money prompt was sent. Put XENTRIPAY_API_KEY in the backend .env, restart the API, and tap Pay again."
+      : isCard
+        ? "Card payment started. Redirect the customer to checkoutUrl, then poll payment status every few seconds."
+        : `Mobile Money started for ${momo.phone}. Approve the prompt on that phone. If no popup appears, dial ${momo.ussd} immediately, open Pending transactions, and confirm. Keep this screen open for about 2 minutes.`,
+    simulated,
+    retryAfterSeconds: simulated ? 0 : 5,
+    pollForSeconds: simulated ? 0 : 120,
+    momo,
+    booking,
+    transaction,
+    collection: {
+      refid: collection?.refid || transaction.collectionRef,
+      tid: collection?.tid || transaction.collectionTid,
+      url: isCard ? checkoutUrl : null,
+      pmethod: method,
+    },
+    split,
+    amount,
+    remainingBalance: Math.max(0, exactTotal - amount),
+  };
+};
 
 const payBooking = async (req, res) => {
   try {
@@ -962,24 +1071,75 @@ const payBooking = async (req, res) => {
       ...req.user.toObject?.() || req.user,
       name: booking.touristId?.name || req.user.name,
       email: booking.touristId?.email || req.user.email,
-      phone: req.body.phone || req.body.cnumber || req.body.senderAccount || req.user.phone,
+      phone:
+        req.body.phone ||
+        req.body.cnumber ||
+        req.body.senderAccount ||
+        booking.bookingDetails?.phone ||
+        req.user.phone,
     });
     if (!paymentDetailsResult.ok) {
       return res.status(paymentDetailsResult.status).json({ message: paymentDetailsResult.message });
     }
 
-    let transaction = existing?.status === "pending" ? existing : null;
-    let collection = transaction
-      ? { refid: transaction.collectionRef, tid: transaction.collectionTid, url: transaction.checkoutUrl }
-      : null;
-    let split = transaction
-      ? {
-          collectedAmount: transaction.amount,
-          commissionPercentage: transaction.commissionPercentage,
-          platformAmount: transaction.platformAmount,
-          providerAmount: transaction.providerAmount,
+    let transaction = null;
+    let collection = null;
+    let split = null;
+
+    if (hasAcceptedGatewayCollection(existing)) {
+      try {
+        const refreshed = await refreshCollection(existing);
+        if (refreshed.status === "SUCCESS") {
+          const settled = await finalizePaidBooking({
+            booking,
+            business,
+            user: req.user,
+            amount,
+            method: paymentDetailsResult.value.paymentMethod,
+            paymentReference: existing.paymentReference,
+            transaction: existing,
+          });
+          if (!settled.paidBooking) return alreadyPaidResponse(res, booking);
+          return res.json({
+            code: "PAYMENT_SUCCESS",
+            message: `Full payment collected into the SafarisCon wallet. Commission ${existing.platformAmount} RWF and provider share ${existing.providerAmount} RWF stay in the wallet until the cancellation window closes.`,
+            booking: settled.paidBooking,
+            transaction: settled.transaction,
+            split: {
+              collectedAmount: existing.amount,
+              commissionPercentage: existing.commissionPercentage,
+              platformAmount: existing.platformAmount,
+              providerAmount: existing.providerAmount,
+            },
+            qr: paymentQr(settled.paidBooking),
+          });
         }
-      : null;
+        if (refreshed.status === "PENDING" && isReusablePendingCollection(existing)) {
+          transaction = existing;
+        } else if (refreshed.status === "PENDING") {
+          await abandonStaleCollection(
+            existing,
+            "Replaced with a new Mobile Money request so a fresh prompt can be sent."
+          );
+        }
+      } catch (_error) {
+        if (isReusablePendingCollection(existing)) transaction = existing;
+      }
+    }
+
+    if (transaction) {
+      collection = {
+        refid: transaction.collectionRef,
+        tid: transaction.collectionTid,
+        url: transaction.checkoutUrl,
+      };
+      split = {
+        collectedAmount: transaction.amount,
+        commissionPercentage: transaction.commissionPercentage,
+        platformAmount: transaction.platformAmount,
+        providerAmount: transaction.providerAmount,
+      };
+    }
 
     if (!transaction) {
       const started = await startCollection({
@@ -1025,7 +1185,12 @@ const payBooking = async (req, res) => {
 
     return res.json(pendingPaymentResponse({ booking, transaction, collection, split, amount, exactTotal }));
   } catch (error) {
-    return res.status(error.status || 500).json({ message: error.message || "Payment failed.", error: error.message });
+    const mapped = toClientPaymentError(error);
+    return res.status(mapped.status).json({
+      code: mapped.code,
+      message: mapped.message,
+      error: mapped.message,
+    });
   }
 };
 
@@ -1040,14 +1205,48 @@ const syncBookingPayment = async (req, res) => {
       return res.status(404).json({ message: "No payment has been started for this booking." });
     }
     if (transaction.status === "paid") return alreadyPaidResponse(res, booking);
+    if (transaction.status === "failed") {
+      const momo = momoApprovalHint(transaction);
+      return res.status(402).json({
+        code: "PAYMENT_FAILED",
+        message: `This Mobile Money request ended without confirmation on ${momo.phone || "the paying phone"}. Tap Pay again to send a new prompt, then dial ${momo.ussd} if no popup appears.`,
+        momo,
+        booking,
+        transaction,
+      });
+    }
+
+    if (transaction.gatewayRaw?.simulated && !getXentripayConfig().simulateSuccess) {
+      return res.status(409).json({
+        code: "PAYMENT_SIMULATED",
+        message:
+          "This payment never reached MTN/Airtel. It was created in simulation mode, so the phone will not get an approve message. Confirm XENTRIPAY_API_KEY is in the backend .env, restart the API, and tap Pay again on a new attempt.",
+        simulated: true,
+        retryAfterSeconds: 0,
+        booking,
+        transaction,
+      });
+    }
+    if (!hasAcceptedGatewayCollection(transaction)) {
+      return res.status(409).json({
+        code: "PAYMENT_NOT_STARTED",
+        message:
+          "This booking has no live Mobile Money prompt yet. Tap Pay again after the XentriPay API key is accepted.",
+        retryAfterSeconds: 0,
+        booking,
+        transaction,
+      });
+    }
 
     const { status } = await refreshCollection(transaction);
+    const momo = momoApprovalHint(transaction);
     if (status === "FAILED") {
       booking.paymentStatus = "failed";
       await booking.save();
       return res.status(402).json({
         code: "PAYMENT_FAILED",
-        message: "The customer payment failed, was declined, or timed out.",
+        message: `No confirmation was received on ${momo.phone || "the Mobile Money phone"}. If no popup appeared, dial ${momo.ussd} and check Pending, then tap Pay again to send a new request.`,
+        momo,
         booking,
         transaction,
       });
@@ -1055,7 +1254,11 @@ const syncBookingPayment = async (req, res) => {
     if (status !== "SUCCESS") {
       return res.json({
         code: "PAYMENT_PENDING",
-        message: "Payment is still waiting for customer confirmation.",
+        message: `Waiting for confirmation on ${momo.phone}. If there is no popup, dial ${momo.ussd} now and approve the pending payment. Keep polling for about 2 minutes.`,
+        simulated: Boolean(transaction.gatewayRaw?.simulated),
+        retryAfterSeconds: 5,
+        pollForSeconds: 120,
+        momo,
         booking,
         transaction,
       });
@@ -1089,7 +1292,11 @@ const syncBookingPayment = async (req, res) => {
       qr: paymentQr(settled.paidBooking),
     });
   } catch (error) {
-    return res.status(error.status || 500).json({ message: error.message || "Failed to check payment status." });
+    const mapped = toClientPaymentError(error);
+    return res.status(mapped.status).json({
+      code: mapped.code,
+      message: mapped.message || "Failed to check payment status.",
+    });
   }
 };
 
