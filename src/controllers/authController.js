@@ -28,6 +28,7 @@ const {
   sendEmailVerificationOtp,
   sendPasswordResetOtp,
   sendLoginOtp,
+  resolveLanguage,
 } = require("../utils/notify");
 const { REALTIME_EVENTS, emitRealtime } = require("../utils/realtime");
 
@@ -101,7 +102,7 @@ const issueSessionTokens = async (user, rememberMe) => {
   });
 };
 
-const issueEmailVerificationOtp = async (user) => {
+const issueEmailVerificationOtp = async (user, language = "en") => {
   if (user.emailVerified) return { sent: false, alreadyVerified: true };
   if (!canSendOtp(user.emailVerificationOtpSentAt)) return { sent: false, cooldown: true };
 
@@ -117,12 +118,13 @@ const issueEmailVerificationOtp = async (user) => {
     name: user.name,
     otp,
     expiresInMinutes: OTP_EXPIRY_MINUTES,
+    language,
   });
 
   return { sent: true };
 };
 
-const issuePasswordResetOtp = async (user) => {
+const issuePasswordResetOtp = async (user, language = "en") => {
   if (!canSendOtp(user.passwordResetOtpSentAt)) return { sent: false, cooldown: true };
 
   const otp = createOtp();
@@ -137,12 +139,13 @@ const issuePasswordResetOtp = async (user) => {
     name: user.name,
     otp,
     expiresInMinutes: OTP_EXPIRY_MINUTES,
+    language,
   });
 
   return { sent: true };
 };
 
-const issueLoginOtp = async (user, rememberMe) => {
+const issueLoginOtp = async (user, rememberMe, language = "en") => {
   if (!canSendOtp(user.loginOtpSentAt)) return { sent: false, cooldown: true };
 
   const otp = createOtp();
@@ -158,6 +161,7 @@ const issueLoginOtp = async (user, rememberMe) => {
     name: user.name,
     otp,
     expiresInMinutes: OTP_EXPIRY_MINUTES,
+    language,
   });
 
   return { sent: true };
@@ -461,7 +465,7 @@ const login = async (req, res) => {
     }
 
     const persistSession = parseRememberMe(rememberMe);
-    const otpResult = await issueLoginOtp(user, persistSession);
+    const otpResult = await issueLoginOtp(user, persistSession, resolveLanguage(req));
     if (otpResult.cooldown) {
       return res.status(429).json({
         code: "LOGIN_OTP_COOLDOWN",
@@ -500,7 +504,7 @@ const resendLoginOtp = async (req, res) => {
       return res.json(generic);
     }
 
-    const result = await issueLoginOtp(user, Boolean(user.loginRememberMe));
+    const result = await issueLoginOtp(user, Boolean(user.loginRememberMe), resolveLanguage(req));
     if (result.cooldown) {
       return res.status(429).json({
         code: "LOGIN_OTP_COOLDOWN",
@@ -670,7 +674,7 @@ const registerTourist = async (req, res) => {
 
     let emailVerificationSent = false;
     try {
-      const otpResult = await issueEmailVerificationOtp(user);
+      const otpResult = await issueEmailVerificationOtp(user, resolveLanguage(req));
       emailVerificationSent = Boolean(otpResult.sent);
     } catch (emailError) {
       console.warn("Email verification OTP delivery failed:", emailError.message);
@@ -843,6 +847,7 @@ const registerBusinessByAdmin = async (req, res) => {
           providerName: normalizedOwnerName,
           sellerId,
           registrationUrl: onboardingCredentials.registrationUrl,
+          language: resolveLanguage(req),
         });
         credentialEmailSent = true;
       } catch (emailError) {
@@ -1052,7 +1057,7 @@ const completeProviderRegistration = async (req, res) => {
 
     let emailVerificationSent = false;
     try {
-      const otpResult = await issueEmailVerificationOtp(user);
+      const otpResult = await issueEmailVerificationOtp(user, resolveLanguage(req));
       emailVerificationSent = Boolean(otpResult.sent);
     } catch (emailError) {
       console.warn("Service provider email verification OTP delivery failed:", emailError.message);
@@ -1104,7 +1109,7 @@ const resendVerificationOtp = async (req, res) => {
       return res.json({ message: "Email is already verified.", emailVerified: true });
     }
 
-    const result = await issueEmailVerificationOtp(user);
+    const result = await issueEmailVerificationOtp(user, resolveLanguage(req));
     if (result.cooldown) {
       return res.status(429).json({
         message: `Please wait ${OTP_RESEND_COOLDOWN_SECONDS} seconds before requesting another code.`,
@@ -1174,7 +1179,7 @@ const forgotPassword = async (req, res) => {
     const user = await User.findOne({ email: normalizedEmail });
     if (!user || !user.password || user.mustSetPassword) return res.json(generic);
 
-    const result = await issuePasswordResetOtp(user);
+    const result = await issuePasswordResetOtp(user, resolveLanguage(req));
     if (result.cooldown) {
       return res.status(429).json({
         message: `Please wait ${OTP_RESEND_COOLDOWN_SECONDS} seconds before requesting another code.`,

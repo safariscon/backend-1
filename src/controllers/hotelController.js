@@ -16,7 +16,7 @@ const {
   normalizeServiceSchedule,
 } = require("../services/marketplaceService");
 const { clearCache } = require("../utils/cache");
-const { sendManualBookingApprovedEmail } = require("../utils/notify");
+const { sendManualBookingApprovedEmail, resolveLanguage } = require("../utils/notify");
 const { hasCompletePayoutDetails, normalizePayoutDetails } = require("../utils/payoutDetails");
 const { normalizeCancelPolicy, cancelCommissionPercentOf } = require("../utils/cancellation");
 const { normalizeAvailabilityTable } = require("../services/automaticBookingService");
@@ -548,6 +548,7 @@ const updateBookingStatus = async (req, res) => {
           depositAmount,
           deadlineAt,
           paymentUrl: buildPaymentUrl(booking._id),
+          language: resolveLanguage(req),
         });
       } catch (emailError) {
         console.warn("Manual booking approval email failed:", emailError.message);
