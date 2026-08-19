@@ -146,8 +146,6 @@ const issuePasswordResetOtp = async (user, language = "en") => {
 };
 
 const issueLoginOtp = async (user, rememberMe, language = "en") => {
-  if (!canSendOtp(user.loginOtpSentAt)) return { sent: false, cooldown: true };
-
   const otp = createOtp();
   user.loginOtpHash = await bcrypt.hash(otp, 10);
   user.loginOtpExpiresAt = minutesFromNow(OTP_EXPIRY_MINUTES);
@@ -465,16 +463,7 @@ const login = async (req, res) => {
     }
 
     const persistSession = parseRememberMe(rememberMe);
-    const otpResult = await issueLoginOtp(user, persistSession, resolveLanguage(req));
-    if (otpResult.cooldown) {
-      return res.status(429).json({
-        code: "LOGIN_OTP_COOLDOWN",
-        message: `Please wait ${OTP_RESEND_COOLDOWN_SECONDS} seconds before requesting another login code.`,
-        expiresInMinutes: OTP_EXPIRY_MINUTES,
-        email: user.email,
-        rememberMe: persistSession,
-      });
-    }
+    await issueLoginOtp(user, persistSession, resolveLanguage(req));
 
     return res.json({
       code: "LOGIN_OTP_REQUIRED",
@@ -504,14 +493,7 @@ const resendLoginOtp = async (req, res) => {
       return res.json(generic);
     }
 
-    const result = await issueLoginOtp(user, Boolean(user.loginRememberMe), resolveLanguage(req));
-    if (result.cooldown) {
-      return res.status(429).json({
-        code: "LOGIN_OTP_COOLDOWN",
-        message: `Please wait ${OTP_RESEND_COOLDOWN_SECONDS} seconds before requesting another login code.`,
-      });
-    }
-
+    await issueLoginOtp(user, Boolean(user.loginRememberMe), resolveLanguage(req));
     return res.json(generic);
   } catch (error) {
     return res.status(500).json({ message: "Failed to resend login code.", error: error.message });
