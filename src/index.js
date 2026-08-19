@@ -11,6 +11,7 @@ if (fs.existsSync(envPath)) {
     "MONGODB_URI",
     "MONGODB_URI_DIRECT",
     "MONGODB_PREFER_DIRECT",
+    "MONGODB_TLS_ALLOW_INVALID_CERTS",
     "DNS_SERVERS",
     "JWT_SECRET",
     "ADMIN_EMAIL",

@@ -8,10 +8,34 @@ const SRV_LOOKUP_ERROR_CODES = new Set([
   "ESERVFAIL",
 ]);
 
-const buildConnectionOptions = () => ({
-  serverSelectionTimeoutMS: Number(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS || 10000),
-  family: 4,
-});
+const buildConnectionOptions = () => {
+  const allowInvalidCerts =
+    String(process.env.MONGODB_TLS_ALLOW_INVALID_CERTS || "").toLowerCase() === "true";
+
+  return {
+    serverSelectionTimeoutMS: Number(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS || 10000),
+    family: 4,
+    ...(allowInvalidCerts ? { tlsAllowInvalidCertificates: true } : {}),
+  };
+};
+
+const getUnderlyingServerError = (error) => {
+  const servers = error?.reason?.servers;
+  if (!servers) return "";
+
+  const entries = servers instanceof Map ? [...servers.values()] : Object.values(servers);
+  const first = entries.find((info) => info?.error?.message)?.error;
+  return first?.message ? String(first.message) : "";
+};
+
+const wrapConnectionError = (error) => {
+  const underlying = getUnderlyingServerError(error);
+  if (!underlying || String(error.message || "").includes(underlying)) return error;
+
+  const wrapped = new Error(`${error.message} Underlying error: ${underlying}`);
+  wrapped.cause = error;
+  return wrapped;
+};
 
 const shouldRetryWithDirectUri = (error) => {
   if (!error) return false;
@@ -35,42 +59,46 @@ const connectDB = async () => {
 
   const connectionOptions = buildConnectionOptions();
 
-  if (preferDirect && directUri) {
+  try {
+    if (preferDirect && directUri) {
+      await mongoose.connect(directUri, connectionOptions);
+      console.log("MongoDB connected using direct URI");
+      return;
+    }
+
+    // Workaround for environments where Node SRV lookups fail with ECONNREFUSED.
+    // You can override with DNS_SERVERS in .env, e.g. DNS_SERVERS=8.8.8.8,1.1.1.1
+    const dnsServers = (process.env.DNS_SERVERS || "8.8.8.8,1.1.1.1")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    if (dnsServers.length > 0) {
+      dns.setServers(dnsServers);
+      console.log(`Using DNS servers: ${dnsServers.join(", ")}`);
+    }
+
+    if (srvUri) {
+      try {
+        await mongoose.connect(srvUri, connectionOptions);
+        console.log("MongoDB connected using SRV URI");
+        return;
+      } catch (error) {
+        if (!directUri || !shouldRetryWithDirectUri(error)) {
+          throw error;
+        }
+
+        console.warn(
+          `Primary Mongo SRV connection failed (${error.code || "unknown"}). Retrying with direct URI...`
+        );
+      }
+    }
+
     await mongoose.connect(directUri, connectionOptions);
     console.log("MongoDB connected using direct URI");
-    return;
+  } catch (error) {
+    throw wrapConnectionError(error);
   }
-
-  // Workaround for environments where Node SRV lookups fail with ECONNREFUSED.
-  // You can override with DNS_SERVERS in .env, e.g. DNS_SERVERS=8.8.8.8,1.1.1.1
-  const dnsServers = (process.env.DNS_SERVERS || "8.8.8.8,1.1.1.1")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  if (dnsServers.length > 0) {
-    dns.setServers(dnsServers);
-    console.log(`Using DNS servers: ${dnsServers.join(", ")}`);
-  }
-
-  if (srvUri) {
-    try {
-      await mongoose.connect(srvUri, connectionOptions);
-      console.log("MongoDB connected using SRV URI");
-      return;
-    } catch (error) {
-      if (!directUri || !shouldRetryWithDirectUri(error)) {
-        throw error;
-      }
-
-      console.warn(
-        `Primary Mongo SRV connection failed (${error.code || "unknown"}). Retrying with direct URI...`
-      );
-    }
-  }
-
-  await mongoose.connect(directUri, connectionOptions);
-  console.log("MongoDB connected using direct URI");
 };
 
 module.exports = connectDB;
