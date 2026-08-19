@@ -11,7 +11,7 @@ const { getPublicLocation, getUnlockedServiceLocation } = require("../utils/serv
 const { storeBookingPdf, getBookingPdfDownloadUrl } = require("../services/bookingPdfStorage");
 const { buildEventData, recordAnalyticsEvent } = require("./analyticsController");
 const { claimRebookId, finalizeRebookIdUse, releaseRebookIdClaim } = require("./rebookController");
-const { sendServiceProviderBookingRequestEmail, sendCustomerBookingReceivedEmail, isDeliverableEmail } = require("../utils/notify");
+const { sendServiceProviderBookingRequestEmail, sendCustomerBookingReceivedEmail, sendBookingPaidEmail, sendBookingCodeEmail, sendBookingCancelledEmail, isDeliverableEmail, resolveLanguage } = require("../utils/notify");
 const { buildSellerBookingsUrl, buildCustomerBookingsUrl } = require("../utils/frontendUrls");
 const { normalizeCustomerPaymentDetails } = require("../utils/payoutDetails");
 const { resolveCommissionPercentage } = require("../utils/commission");
@@ -46,7 +46,7 @@ const {
 } = require("../services/automaticBookingService");
 
 const publicFrontendUrl = () =>
-  String(process.env.PUBLIC_FRONTEND_URL || process.env.FRONTEND_URL || "https://safariscon.vercel.app").replace(/\/+$/, "");
+  String(process.env.PUBLIC_FRONTEND_URL || process.env.FRONTEND_URL || "https://safariscon.eserveconn.com").replace(/\/+$/, "");
 
 const buildVerifyUrl = (token) => `${publicFrontendUrl()}/verify/${encodeURIComponent(token)}`;
 const buildPaymentUrl = (bookingId) => `${publicFrontendUrl()}/bookings/${encodeURIComponent(bookingId)}/pay`;
@@ -149,6 +149,7 @@ const notifyBookingCreated = async ({
   business,
   selectedOption,
   automaticQuote,
+  language,
 }) => {
   const bookingId = booking?._id;
   const mode = booking?.bookingMode || (automaticQuote ? "automatic" : "manual");
@@ -189,6 +190,7 @@ const notifyBookingCreated = async ({
       customerLocation: booking?.customerLocation || details.customerLocation || "",
       specialRequests: details.specialRequests || "",
       dashboardUrl: buildSellerBookingsUrl({ bookingId }),
+      language,
     });
   }
 
@@ -199,6 +201,7 @@ const notifyBookingCreated = async ({
       customerName,
       dashboardUrl: buildCustomerBookingsUrl({ bookingId }),
       paymentUrl: automaticQuote ? buildPaymentUrl(bookingId) : "",
+      language,
     });
   }
 };
@@ -739,6 +742,7 @@ const createBookingRequest = async (req, res) => {
         business: selectedBusiness,
         selectedOption,
         automaticQuote,
+        language: resolveLanguage(req),
       });
     } catch (emailError) {
       console.warn("Booking notification email failed:", emailError.message);
@@ -816,7 +820,7 @@ const alreadyPaidResponse = async (res, booking, message = "Payment was already 
   });
 };
 
-const finalizePaidBooking = async ({ booking, business, user, amount, method, paymentReference, transaction }) => {
+const finalizePaidBooking = async ({ booking, business, user, amount, method, paymentReference, transaction, language = "en" }) => {
   const exactTotal = Number(booking.totalPrice || 0);
   if (!booking.bookingCode) booking.bookingCode = prefixedCode("SCN", 10);
   if (!booking.verificationCode) booking.verificationCode = prefixedCode("VERIFY", 10);
@@ -944,6 +948,34 @@ const finalizePaidBooking = async ({ booking, business, user, amount, method, pa
     businessId: business?._id || null,
     paymentStatus: paidBooking.paymentStatus,
   });
+
+  try {
+    const customerEmail = paidBooking.touristId?.email || paidBooking.bookingDetails?.email || user?.email || "";
+    if (isDeliverableEmail(customerEmail)) {
+      const customerName = paidBooking.touristId?.name || paidBooking.bookingDetails?.fullName || user?.name;
+      const businessName = business?.name || paidBooking.destinationPlace || "";
+      await sendBookingPaidEmail({
+        customerEmail,
+        customerName,
+        businessName,
+        bookingId: paidBooking._id,
+        bookingCode: paidBooking.bookingCode,
+        amount: paidBooking.amountPaid || amount,
+        language,
+      });
+      if (paidBooking.bookingCode) {
+        await sendBookingCodeEmail({
+          customerEmail,
+          customerName,
+          businessName,
+          bookingCode: paidBooking.bookingCode,
+          language,
+        });
+      }
+    }
+  } catch (emailError) {
+    console.warn("Booking paid email failed:", emailError.message);
+  }
 
   return { paidBooking, transaction };
 };
@@ -1098,6 +1130,7 @@ const payBooking = async (req, res) => {
             method: paymentDetailsResult.value.paymentMethod,
             paymentReference: existing.paymentReference,
             transaction: existing,
+            language: resolveLanguage(req),
           });
           if (!settled.paidBooking) return alreadyPaidResponse(res, booking);
           return res.json({
@@ -1171,6 +1204,7 @@ const payBooking = async (req, res) => {
         method: paymentDetailsResult.value.paymentMethod,
         paymentReference: transaction.paymentReference,
         transaction,
+        language: resolveLanguage(req),
       });
       if (!settled.paidBooking) return alreadyPaidResponse(res, booking);
       return res.json({
@@ -1275,6 +1309,7 @@ const syncBookingPayment = async (req, res) => {
       method: transaction.paymentMethod || "mobile-money",
       paymentReference: transaction.paymentReference,
       transaction,
+      language: resolveLanguage(req),
     });
     if (!settled.paidBooking) return alreadyPaidResponse(res, booking);
 
@@ -1481,6 +1516,23 @@ const cancelBooking = async (req, res) => {
     }
 
     const result = await applyCustomerCancellation({ booking, reason });
+
+    try {
+      const customerEmail = result.booking.bookingDetails?.email || req.user?.email || "";
+      if (isDeliverableEmail(customerEmail)) {
+        await sendBookingCancelledEmail({
+          customerEmail,
+          customerName: result.booking.bookingDetails?.fullName || req.user?.name,
+          businessName: result.booking.destinationPlace || "",
+          bookingId: result.booking._id,
+          refundAmount: result.split?.refundAmount,
+          penaltyAmount: result.split?.penaltyAmount,
+          language: resolveLanguage(req),
+        });
+      }
+    } catch (emailError) {
+      console.warn("Booking cancelled email failed:", emailError.message);
+    }
 
     if (AuditLog.db.readyState === 1) {
       await AuditLog.create({

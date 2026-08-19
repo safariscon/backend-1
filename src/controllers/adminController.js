@@ -11,7 +11,7 @@ const { normalizePriceOption, hasCompleteAutomaticRules, getAutomaticRuleDefault
 const { registerBusinessByAdmin } = require("./authController");
 const { prefixedCode, secureToken } = require("../utils/secureIds");
 const { generateUniqueSellerId } = require("../utils/sellerIds");
-const { sendProviderOnboardingEmail, sendBusinessApprovedEmail } = require("../utils/notify");
+const { sendProviderOnboardingEmail, sendBusinessApprovedEmail, resolveLanguage } = require("../utils/notify");
 const { buildProviderInviteUrl, normalizeSellerId } = require("../utils/providerOnboarding");
 const { buildAdminServiceFilter } = require("../utils/serviceFilters");
 const {
@@ -66,6 +66,7 @@ const createSeller = async (req, res) => {
         providerName: name,
         sellerId,
         registrationUrl,
+        language: resolveLanguage(req),
       });
       credentialEmailSent = true;
     } catch (emailError) {
@@ -307,6 +308,7 @@ const updateBusinessVerification = async (req, res) => {
             serviceProviderName: business.ownerUserId?.name || business.name,
             businessName: business.name,
             commissionPercentage: business.commissionPercentage,
+            language: resolveLanguage(req),
           });
         }
       } catch (emailError) {

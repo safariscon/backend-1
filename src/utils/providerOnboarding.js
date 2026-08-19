@@ -1,5 +1,5 @@
 const publicFrontendUrl = () =>
-  String(process.env.PUBLIC_FRONTEND_URL || process.env.FRONTEND_URL || "https://safariscon.vercel.app").replace(/\/+$/, "");
+  String(process.env.PUBLIC_FRONTEND_URL || process.env.FRONTEND_URL || "https://safariscon.eserveconn.com").replace(/\/+$/, "");
 
 const PROVIDER_REGISTER_PATH = "/provider-register";
 

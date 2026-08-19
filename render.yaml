@@ -10,11 +10,11 @@ services:
       - key: NODE_ENV
         value: production
       - key: CORS_ORIGINS
-        value: https://safariscon.vercel.app
+        value: https://safariscon.eserveconn.com
       - key: FRONTEND_URL
-        value: https://safariscon.vercel.app
+        value: https://safariscon.eserveconn.com
       - key: PUBLIC_FRONTEND_URL
-        value: https://safariscon.vercel.app
+        value: https://safariscon.eserveconn.com
       - key: PUBLIC_API_URL
         value: https://umuhuzaback.onrender.com
       - key: MONGODB_URI
