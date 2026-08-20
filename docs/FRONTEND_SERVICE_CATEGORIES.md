@@ -17,7 +17,14 @@ Backend now owns **service categories**, **field schemas**, **options**, and **a
 
 ---
 
-## Auth roles
+## Frontend note — category binding
+
+- When creating a service, UI shows **category name**.
+- Request body must send **`categoryId`** (from `GET /api/service-categories`).
+- Do not rely on slug for ownership; slug can change.
+- Filter seller services with `?categoryId=<id>` preferred over `?categorySlug=`.
+
+
 
 - `admin`
 - seller: `hotel` / `supplier`
@@ -287,3 +294,105 @@ Seed packs included: hotel, apartment, homestay, car-rental, taxi, motorbike, to
 - [ ] Booking missing required `bookingAttributes` → 400
 - [ ] Pay endpoint still works for confirmed booking
 - [ ] Public cards use `primaryImage || images[0]`
+- [ ] Admin can toggle category `supportsOptions` off → option schema tab hidden; seller has no options UI and sends `basePrice`
+
+---
+
+## 9) Option-less categories (`supportsOptions: false`)
+
+### Backend behavior (already supported + hardened)
+
+| Action | Behavior |
+|--------|----------|
+| `PUT /api/admin/service-categories/:id` with `"supportsOptions": false` | Saves flag; **clears `optionFieldSchema` to `[]`** |
+| Linked services | Sync `supportsOptions=false` + empty `schemaSnapshot.optionFieldSchema` |
+| Seller `POST .../options` | `400` — category does not support options |
+| Seller create service | Must send **`basePrice`** (RWF); backend creates one internal default price row |
+| Admin approve | Does **not** require options when `supportsOptions` is false |
+
+### Admin UI — what to build
+
+On category create/edit page, add a clear control:
+
+```text
+[ ] This category has priced options / packages
+    ON  = Hotel rooms, car packages, tour packages → show Option fields tab
+    OFF = Restaurant, cafe, simple service → listing + booking only; hide Option fields tab
+```
+
+Bind to boolean `supportsOptions`.
+
+**When OFF:**
+1. Hide **Option fields** tab/builder completely
+2. Do not send leftover `optionFieldSchema` (or send `[]`)
+3. Save with:
+
+```json
+PUT /api/admin/service-categories/:id
+{
+  "supportsOptions": false,
+  "listingFieldSchema": [ /* ... */ ],
+  "optionFieldSchema": [],
+  "bookingFieldSchema": [ /* ... */ ]
+}
+```
+
+**When ON:**
+```json
+{
+  "supportsOptions": true,
+  "optionFieldSchema": [ /* admin-defined only */ ]
+}
+```
+
+Suggested label copy:
+- Title: **Priced options**
+- Helper: “If off, sellers only set one base price. If on, sellers add named packages (Standard / Deluxe, Economy / SUV).”
+
+### Seller UI — what to build
+
+After loading category (`GET /api/service-categories/:id` or from list):
+
+```js
+if (category.supportsOptions === false) {
+  // Show: listingAttributes form + single Base price (RWF) input
+  // Hide: Options page, “Add option”, optionFieldSchema renderer
+  body.basePrice = Number(basePriceInput);
+} else {
+  // Show: listingAttributes form
+  // After create → navigate to options page
+  // Hide basePrice (price lives on each option)
+}
+```
+
+Create payload when option-less:
+
+```json
+{
+  "categoryId": "<id>",
+  "title": "Kigali Garden Cafe",
+  "description": "...",
+  "basePrice": 15000,
+  "listingAttributes": { "cuisine": "Rwandan", "dressCode": "Casual" },
+  "location": { /* geocode */ },
+  "contactDetails": { "phoneE164": "+2507...", "phoneIso": "RW" },
+  "images": [],
+  "primaryImage": null
+}
+```
+
+### Customer UI
+
+- Option-less: no package picker; use service `basePrice` / single default option
+- With options: show `service.options` picker (`name` + `price` + `attributes`)
+
+### Frontend checklist for this feature
+
+- [ ] Admin toggle `supportsOptions` on create + edit
+- [ ] Edit loads current `supportsOptions` from `GET /api/admin/service-categories/:id`
+- [ ] When false, Option schema UI hidden and not submitted
+- [ ] Seller create reads `supportsOptions` from selected category
+- [ ] Seller create shows `basePrice` only when false
+- [ ] Seller options routes hidden / blocked when false
+- [ ] List cards can show “From X RWF” from `basePrice` or min option price
+

@@ -61,7 +61,7 @@ const serviceOptionSchema = new mongoose.Schema(
     },
     availableDays: {
       type: [String],
-      default: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+      default: [],
     },
     availableStartTime: {
       type: String,

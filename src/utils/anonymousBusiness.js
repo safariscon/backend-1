@@ -55,6 +55,7 @@ const getDestinationRegion = (location) => {
 
 const anonymizeBusiness = (business, guestName) => {
   const { images, primaryImage } = withPrimaryImage(business);
+  const categorySlug = business.categorySlug || business.type || "service";
   return {
     _id: business._id,
     id: business._id,
@@ -62,32 +63,31 @@ const anonymizeBusiness = (business, guestName) => {
     displayName: guestName,
     anonymousName: guestName,
     isAnonymous: true,
-    type: business.type || "service",
-    category: business.type || "service",
+    type: categorySlug,
+    category: categorySlug,
+    categoryId: business.categoryId || null,
+    categorySlug,
     location: business.locationDetails?.district || getDestinationRegion(business.location),
     destinationLocation: business.locationDetails?.district || getDestinationRegion(business.location),
-    description: `Book this verified ${getGuestCategoryLabel(business.type).toLowerCase()} securely. Provider identity and exact details unlock after full payment.`,
+    description: `Book this verified ${getGuestCategoryLabel(business.type || categorySlug).toLowerCase()} securely. Provider identity and exact details unlock after full payment.`,
     basePrice: 0,
     priceText: "",
-  images,
-  primaryImage,
-  promotion: business.promotion || { enabled: false },
-  category: business.categorySlug || business.type || "service",
-  categoryId: business.categoryId || null,
-  categorySlug: business.categorySlug || business.type || "service",
-  listingAttributes: business.listingAttributes || {},
-  supportsOptions: business.supportsOptions !== false,
-  catalogLocation: business.catalogLocation
-    ? {
-        latitude: business.catalogLocation.latitude,
-        longitude: business.catalogLocation.longitude,
-        formattedAddress: business.catalogLocation.formattedAddress,
-        country: business.catalogLocation.country,
-        state: business.catalogLocation.state,
-        city: business.catalogLocation.city,
-        area: business.catalogLocation.area,
-      }
-    : null,
+    images,
+    primaryImage,
+    promotion: business.promotion || { enabled: false },
+    listingAttributes: business.listingAttributes || {},
+    supportsOptions: business.supportsOptions !== false,
+    catalogLocation: business.catalogLocation
+      ? {
+          latitude: business.catalogLocation.latitude,
+          longitude: business.catalogLocation.longitude,
+          formattedAddress: business.catalogLocation.formattedAddress,
+          country: business.catalogLocation.country,
+          state: business.catalogLocation.state,
+          city: business.catalogLocation.city,
+          area: business.catalogLocation.area,
+        }
+      : null,
     amenities: [],
     services: [],
     approvalStatus: business.approvalStatus,

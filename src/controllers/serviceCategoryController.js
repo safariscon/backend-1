@@ -1,7 +1,43 @@
 const ServiceCategory = require("../models/ServiceCategory");
+const Hotel = require("../models/Hotel");
 const { ensureSeededCategories } = require("../utils/ensureCategories");
 const { normalizeFieldSchema, slugify } = require("../utils/fieldSchema");
 const { clearCache } = require("../utils/cache");
+
+const parseBoolean = (value, fallback = false) => {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  return ["true", "1", "yes", "on"].includes(String(value).trim().toLowerCase());
+};
+
+const applySupportsOptionsSideEffects = (category) => {
+  if (category.supportsOptions === false) {
+    category.optionFieldSchema = [];
+  }
+};
+
+const syncCategoryToServices = async (category) => {
+  await Hotel.updateMany(
+    { categoryId: category._id },
+    {
+      $set: {
+        categorySlug: category.slug,
+        type: category.slug,
+        supportsOptions: Boolean(category.supportsOptions),
+        "schemaSnapshot.categoryId": category._id,
+        "schemaSnapshot.categorySlug": category.slug,
+        "schemaSnapshot.categoryName": category.name,
+        "schemaSnapshot.supportsOptions": Boolean(category.supportsOptions),
+        "schemaSnapshot.optionFieldSchema": category.supportsOptions
+          ? category.optionFieldSchema || []
+          : [],
+        "schemaSnapshot.listingFieldSchema": category.listingFieldSchema || [],
+        "schemaSnapshot.bookingFieldSchema": category.bookingFieldSchema || [],
+      },
+    }
+  );
+};
 
 const serializeCategory = (category, { includeInactive = false } = {}) => {
   if (!category) return null;
@@ -106,9 +142,11 @@ const createAdminCategory = async (req, res) => {
       icon: req.body.icon || null,
       isActive: req.body.isActive !== false,
       sortOrder: Number(req.body.sortOrder || 0),
-      supportsOptions: req.body.supportsOptions !== false,
+      supportsOptions: parseBoolean(req.body.supportsOptions, true),
       listingFieldSchema: normalizeFieldSchema(req.body.listingFieldSchema, "listing"),
-      optionFieldSchema: normalizeFieldSchema(req.body.optionFieldSchema, "option"),
+      optionFieldSchema: parseBoolean(req.body.supportsOptions, true)
+        ? normalizeFieldSchema(req.body.optionFieldSchema, "option")
+        : [],
       bookingFieldSchema: normalizeFieldSchema(req.body.bookingFieldSchema, "booking"),
       defaults: {
         suggestedCancelWindowHours: Math.max(
@@ -136,7 +174,7 @@ const updateAdminCategory = async (req, res) => {
     if (req.body.icon !== undefined) category.icon = req.body.icon || null;
     if (req.body.isActive != null) category.isActive = Boolean(req.body.isActive);
     if (req.body.sortOrder != null) category.sortOrder = Number(req.body.sortOrder) || 0;
-    if (req.body.supportsOptions != null) category.supportsOptions = Boolean(req.body.supportsOptions);
+    if (req.body.supportsOptions != null) category.supportsOptions = parseBoolean(req.body.supportsOptions, true);
     if (req.body.slug) {
       const nextSlug = slugify(req.body.slug);
       if (nextSlug && nextSlug !== category.slug) {
@@ -161,7 +199,10 @@ const updateAdminCategory = async (req, res) => {
       category.bookingFieldSchema = normalizeFieldSchema(req.body.bookingFieldSchema, "booking");
     }
 
+    applySupportsOptionsSideEffects(category);
     await category.save();
+    await syncCategoryToServices(category);
+
     clearCache("public:");
     return res.json({ message: "Category updated.", category: serializeCategory(category, { includeInactive: true }) });
   } catch (error) {
@@ -183,9 +224,11 @@ const updateAdminCategoryFields = async (req, res) => {
     if (Array.isArray(req.body.bookingFieldSchema)) {
       category.bookingFieldSchema = normalizeFieldSchema(req.body.bookingFieldSchema, "booking");
     }
-    if (req.body.supportsOptions != null) category.supportsOptions = Boolean(req.body.supportsOptions);
+    if (req.body.supportsOptions != null) category.supportsOptions = parseBoolean(req.body.supportsOptions, true);
 
+    applySupportsOptionsSideEffects(category);
     await category.save();
+    await syncCategoryToServices(category);
     clearCache("public:");
     return res.json({ message: "Category field schemas updated.", category: serializeCategory(category, { includeInactive: true }) });
   } catch (error) {

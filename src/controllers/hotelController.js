@@ -39,7 +39,10 @@ const { normalizeCatalogLocation } = require("../utils/catalogLocation");
 const {
   syncServiceOptionsToAvailabilityTable,
   migrateAvailabilityRowsToOptions,
+  serializeSellerOption,
 } = require("../utils/serviceOptionSync");
+const { buildOptionEngineDefaults } = require("../utils/serviceOptionView");
+const User = require("../models/User");
 
 const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
 const DEPOSIT_PERCENT = 30;
@@ -453,16 +456,26 @@ const listMyServices = async (req, res) => {
   try {
     if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
     const filter = { ...sellerBusinessFilter(req) };
-    const categoryKey = String(req.query.categoryId || req.query.categorySlug || req.query.category || "").trim();
-    if (categoryKey) {
-      if (/^[a-f0-9]{24}$/i.test(categoryKey)) filter.categoryId = categoryKey;
-      else {
-        const slug = slugify(categoryKey);
-        filter.$and = [...(filter.$and || []), { $or: [{ categorySlug: slug }, { type: slug }] }];
+    const categoryIdQuery = String(req.query.categoryId || "").trim();
+    const categorySlugQuery = String(req.query.categorySlug || req.query.category || "").trim();
+    if (categoryIdQuery) {
+      if (!/^[a-f0-9]{24}$/i.test(categoryIdQuery)) {
+        return res.status(400).json({ message: "categoryId must be a valid id." });
       }
+      filter.categoryId = categoryIdQuery;
+    } else if (categorySlugQuery) {
+      // Resolve slug → id so renamed categories still match linked services.
+      const category = await ServiceCategory.findOne({ slug: slugify(categorySlugQuery) }).select("_id").lean();
+      if (!category) return res.json({ services: [] });
+      filter.categoryId = category._id;
     }
     const businesses = await Hotel.find(filter).sort({ createdAt: -1 }).lean();
     const businessIds = businesses.map((business) => business._id);
+    const categoryIds = [...new Set(businesses.map((b) => String(b.categoryId || "")).filter(Boolean))];
+    const categories = categoryIds.length
+      ? await ServiceCategory.find({ _id: { $in: categoryIds } }).lean()
+      : [];
+    const categoryById = new Map(categories.map((c) => [String(c._id), c]));
 
     const services = await HotelService.find({ hotelId: { $in: businessIds } }).sort({
       category: 1,
@@ -471,14 +484,19 @@ const listMyServices = async (req, res) => {
     const commissionByBusiness = new Map(
       businesses.map((business) => [String(business._id), Number(business.commissionPercentage ?? 5)])
     );
-    const businessListings = businesses.map((business) => ({
+    const businessListings = businesses.map((business) => {
+      const liveCategory = categoryById.get(String(business.categoryId || ""));
+      const categorySlug = liveCategory?.slug || business.categorySlug || business.type;
+      const categoryName = liveCategory?.name || categorySlug;
+      return {
       ...withCommissionTerms(withPrimaryImage(business)),
       title: business.name,
       name: business.name,
-      category: business.categorySlug || business.type,
+      category: categorySlug,
       categoryId: business.categoryId || null,
-      categorySlug: business.categorySlug || business.type,
-      serviceType: business.type,
+      categorySlug,
+      categoryName,
+      serviceType: categorySlug,
       status: business.status,
       approvalStatus: business.approvalStatus,
       verificationStatus: business.approvalStatus,
@@ -486,7 +504,8 @@ const listMyServices = async (req, res) => {
       availabilityText: `${business.quantityRemaining ?? business.availableQuantity ?? 0} remaining`,
       platformCommissionPercent: business.commissionPercentage,
       cancelPenaltyPercent: business.cancelPenaltyPercent,
-    }));
+    };
+    });
     const serviceListings = services.map((service) => {
       const data = typeof service.toObject === "function" ? service.toObject() : { ...service };
       const percentage = commissionByBusiness.get(String(data.hotelId)) ?? 5;
@@ -769,6 +788,39 @@ const completeVerifiedBooking = async (req, res) => {
   }
 };
 
+const buildServiceProviderPayload = async (business, fallbackUser = null) => {
+  let owner = null;
+  if (business?.ownerUserId) {
+    owner = await User.findById(business.ownerUserId).select("name email phone sellerId role").lean();
+  }
+  if (!owner && fallbackUser?._id) {
+    owner = {
+      _id: fallbackUser._id,
+      name: fallbackUser.name,
+      email: fallbackUser.email,
+      phone: fallbackUser.phone,
+      sellerId: fallbackUser.sellerId,
+      role: fallbackUser.role,
+    };
+  }
+
+  const contact = business?.contactDetails || {};
+  return {
+    id: owner?._id || business?.ownerUserId || null,
+    name: owner?.name || "",
+    email: owner?.email || business?.sellerContactEmail || contact.email || "",
+    phone:
+      owner?.phone ||
+      contact.phoneE164 ||
+      contact.phone ||
+      contact.whatsappE164 ||
+      contact.whatsapp ||
+      "",
+    sellerId: owner?.sellerId || "",
+    role: owner?.role || "",
+  };
+};
+
 const upsertMyService = async (req, res) => {
   try {
     if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
@@ -791,15 +843,23 @@ const upsertMyService = async (req, res) => {
     await ensureSeededCategories();
 
     const title = String(req.body.title || req.body.name || "").trim();
-    const categoryKey = String(req.body.categoryId || req.body.categorySlug || req.body.category || "").trim();
-    if (!title || !categoryKey) {
-      return res.status(400).json({ message: "categoryId (or category slug) and title are required." });
+    // Prefer categoryId (stable). Frontend should send categoryId from the selected category name.
+    const categoryId = String(req.body.categoryId || "").trim();
+    const categoryFallback = String(req.body.categorySlug || req.body.category || "").trim();
+    if (!title || (!categoryId && !categoryFallback)) {
+      return res.status(400).json({ message: "categoryId and title are required." });
     }
 
-    const categoryFilter = /^[a-f0-9]{24}$/i.test(categoryKey)
-      ? { _id: categoryKey, isActive: true }
-      : { slug: slugify(categoryKey), isActive: true };
-    const category = await ServiceCategory.findOne(categoryFilter).lean();
+    let category = null;
+    if (categoryId) {
+      if (!/^[a-f0-9]{24}$/i.test(categoryId)) {
+        return res.status(400).json({ message: "categoryId must be a valid category id." });
+      }
+      category = await ServiceCategory.findOne({ _id: categoryId, isActive: true }).lean();
+    } else {
+      // Backward-compatible fallback only.
+      category = await ServiceCategory.findOne({ slug: slugify(categoryFallback), isActive: true }).lean();
+    }
     if (!category) {
       return res.status(400).json({ message: "Active service category not found." });
     }
@@ -1047,7 +1107,7 @@ const upsertMyService = async (req, res) => {
 
       const criticalChanged =
         existingBusiness.name !== title ||
-        String(existingBusiness.categorySlug || existingBusiness.type) !== category.slug ||
+        String(existingBusiness.categoryId || "") !== String(category._id) ||
         JSON.stringify(existingBusiness.listingAttributes || {}) !== JSON.stringify(listingValidation.attributes) ||
         Number(existingBusiness.catalogLocation?.latitude) !== Number(catalogLocation.latitude) ||
         Number(existingBusiness.catalogLocation?.longitude) !== Number(catalogLocation.longitude) ||
@@ -1099,7 +1159,10 @@ const upsertMyService = async (req, res) => {
 
       clearCache("public:");
       emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "seller-business-updated", hotelId: business._id });
-      const options = await ServiceOption.find({ serviceId: business._id }).sort({ sortOrder: 1 }).lean();
+      const [options, provider] = await Promise.all([
+        ServiceOption.find({ serviceId: business._id }).sort({ sortOrder: 1 }).lean(),
+        buildServiceProviderPayload(business.toObject ? business.toObject() : business, req.user),
+      ]);
       return res.json({
         message:
           business.approvalStatus === "approved"
@@ -1107,7 +1170,12 @@ const upsertMyService = async (req, res) => {
             : "Service updated and sent for admin approval.",
         service: {
           ...withPrimaryImage(business.toObject ? business.toObject() : business),
-          options,
+          options: options.map(serializeSellerOption),
+          provider,
+          providerName: provider.name,
+          providerEmail: provider.email,
+          providerPhone: provider.phone,
+          sellerId: provider.sellerId,
         },
       });
     }
@@ -1156,12 +1224,20 @@ const upsertMyService = async (req, res) => {
 
     emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "seller-business-created", hotelId: business._id });
     clearCache("public:");
-    const options = await ServiceOption.find({ serviceId: business._id }).sort({ sortOrder: 1 }).lean();
+    const [options, provider] = await Promise.all([
+      ServiceOption.find({ serviceId: business._id }).sort({ sortOrder: 1 }).lean(),
+      buildServiceProviderPayload(business.toObject ? business.toObject() : business, req.user),
+    ]);
     return res.status(201).json({
       message: "Service created and sent for admin approval.",
       service: {
         ...withPrimaryImage(business.toObject ? business.toObject() : business),
-        options,
+        options: options.map(serializeSellerOption),
+        provider,
+        providerName: provider.name,
+        providerEmail: provider.email,
+        providerPhone: provider.phone,
+        sellerId: provider.sellerId,
       },
     });
   } catch (error) {
@@ -1177,14 +1253,31 @@ const getMyService = async (req, res) => {
     if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
     const business = await Hotel.findOne({ _id: req.params.serviceId, ...sellerBusinessFilter(req) }).lean();
     if (!business) return res.status(404).json({ message: "Service not found." });
-    const options = await ServiceOption.find({ serviceId: business._id }).sort({ sortOrder: 1, createdAt: 1 }).lean();
-    return res.json({
-      service: {
-        ...withCommissionTerms(withPrimaryImage(business)),
-        options,
-        category: business.categorySlug || business.type,
-      },
-    });
+    const [options, liveCategory, provider] = await Promise.all([
+      ServiceOption.find({ serviceId: business._id }).sort({ sortOrder: 1, createdAt: 1 }).lean(),
+      business.categoryId ? ServiceCategory.findById(business.categoryId).lean() : null,
+      buildServiceProviderPayload(business, req.user),
+    ]);
+    const categorySlug = liveCategory?.slug || business.categorySlug || business.type;
+    const optionSchema = liveCategory?.optionFieldSchema || business.schemaSnapshot?.optionFieldSchema || [];
+    const servicePayload = {
+      ...withCommissionTerms(withPrimaryImage(business)),
+      // Seller UI should render options from this array (name/price/attributes only).
+      options: options.map(serializeSellerOption),
+      optionFieldSchema: optionSchema,
+      provider,
+      providerName: provider.name,
+      providerEmail: provider.email,
+      providerPhone: provider.phone,
+      sellerId: provider.sellerId,
+      categoryId: business.categoryId || liveCategory?._id || null,
+      categorySlug,
+      categoryName: liveCategory?.name || categorySlug,
+      category: categorySlug,
+    };
+    // Hide booking-engine availabilityTable from seller detail UI (it contains internal defaults).
+    delete servicePayload.availabilityTable;
+    return res.json({ service: servicePayload });
   } catch (error) {
     return res.status(500).json({ message: "Failed to fetch service.", error: error.message });
   }
@@ -1199,7 +1292,10 @@ const listMyServiceOptions = async (req, res) => {
       return res.status(400).json({ message: "This service category does not support options." });
     }
     const options = await ServiceOption.find({ serviceId: business._id }).sort({ sortOrder: 1, createdAt: 1 }).lean();
-    return res.json({ options });
+    return res.json({
+      options: options.map(serializeSellerOption),
+      optionFieldSchema: business.schemaSnapshot?.optionFieldSchema || [],
+    });
   } catch (error) {
     return res.status(500).json({ message: "Failed to list options.", error: error.message });
   }
@@ -1220,29 +1316,20 @@ const upsertMyServiceOption = async (req, res) => {
       return res.status(400).json({ message: "name and a valid price are required." });
     }
 
+    // Only admin-defined optionFieldSchema fields are accepted beyond name/price.
     const schema = business.schemaSnapshot?.optionFieldSchema || [];
-    const attrs = validateAttributesAgainstSchema(req.body.attributes || {}, schema, { label: "option attributes" });
+    const attrs = validateAttributesAgainstSchema(req.body.attributes || {}, schema, {
+      label: "option attributes",
+    });
     if (!attrs.ok) return res.status(400).json({ message: attrs.message, errors: attrs.errors });
 
+    const engineDefaults = buildOptionEngineDefaults();
     const payload = {
       serviceId: business._id,
       name,
       price,
       currency: String(req.body.currency || "RWF").trim().toUpperCase() || "RWF",
-      priceType: String(req.body.priceType || "fixed").trim(),
-      calculationField: String(req.body.calculationField || "quantity").trim(),
-      durationUnit: String(req.body.durationUnit || "").trim(),
-      maximumDuration: req.body.maximumDuration == null ? null : Number(req.body.maximumDuration),
-      capacity: Math.max(0, Number(req.body.capacity ?? req.body.availability ?? 1)),
-      availableFrom: String(req.body.availableFrom || "").trim(),
-      availableTo: String(req.body.availableTo || "").trim(),
-      availableDays: Array.isArray(req.body.availableDays)
-        ? req.body.availableDays.map((day) => String(day).trim()).filter(Boolean)
-        : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-      availableStartTime: String(req.body.availableStartTime || "").trim(),
-      availableEndTime: String(req.body.availableEndTime || "").trim(),
-      requiresTime: Boolean(req.body.requiresTime),
-      details: String(req.body.details || "").trim(),
+      ...engineDefaults,
       attributes: attrs.attributes,
       sortOrder: Number(req.body.sortOrder || 0),
       isActive: req.body.isActive !== false,
@@ -1268,7 +1355,7 @@ const upsertMyServiceOption = async (req, res) => {
     clearCache("public:");
     return res.status(req.params.optionId ? 200 : 201).json({
       message: req.params.optionId ? "Option updated." : "Option created.",
-      option,
+      option: serializeSellerOption(option),
     });
   } catch (error) {
     return res.status(500).json({ message: "Failed to save option.", error: error.message });

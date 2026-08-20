@@ -1,15 +1,17 @@
 const ServiceOption = require("../models/ServiceOption");
+const { serializeSellerOption, buildOptionEngineDefaults } = require("./serviceOptionView");
 
 const optionToAvailabilityRow = (option) => ({
   id: String(option._id),
   cells: {
     service: option.name,
     price: option.price,
+    // Engine defaults only — sellers do not configure these unless admin adds optionFieldSchema attrs.
     priceType: option.priceType || "fixed",
     calculationField: option.calculationField || "quantity",
     durationUnit: option.durationUnit || "",
     maximumDuration: option.maximumDuration,
-    availability: option.capacity,
+    availability: Math.max(1, Number(option.capacity || 1)),
     availableFrom: option.availableFrom || "",
     availableTo: option.availableTo || "",
     availableDays: Array.isArray(option.availableDays) ? option.availableDays.join(",") : "",
@@ -63,6 +65,7 @@ const migrateAvailabilityRowsToOptions = async (service) => {
   const rows = service.availabilityTable?.rows || [];
   if (!rows.length) return 0;
 
+  const defaults = buildOptionEngineDefaults();
   const docs = rows.map((row, index) => {
     const cells = row.cells || {};
     return {
@@ -70,21 +73,8 @@ const migrateAvailabilityRowsToOptions = async (service) => {
       name: String(cells.service || cells.name || `Option ${index + 1}`).trim(),
       price: Math.max(0, Number(cells.price || 0)),
       currency: "RWF",
-      priceType: String(cells.priceType || "fixed").trim(),
-      calculationField: String(cells.calculationField || "quantity").trim(),
-      durationUnit: String(cells.durationUnit || "").trim(),
-      maximumDuration: cells.maximumDuration == null ? null : Number(cells.maximumDuration),
-      capacity: Math.max(0, Number(cells.availability || 1)),
-      availableFrom: String(cells.availableFrom || "").trim(),
-      availableTo: String(cells.availableTo || "").trim(),
-      availableDays: String(cells.availableDays || "Mon,Tue,Wed,Thu,Fri,Sat,Sun")
-        .split(",")
-        .map((day) => day.trim())
-        .filter(Boolean),
-      availableStartTime: String(cells.availableStartTime || "").trim(),
-      availableEndTime: String(cells.availableEndTime || "").trim(),
-      requiresTime: Boolean(cells.requiresTime),
-      details: String(cells.details || "").trim(),
+      ...defaults,
+      capacity: Math.max(1, Number(cells.availability || 1)),
       attributes: {},
       sortOrder: index,
       isActive: true,
@@ -99,4 +89,5 @@ module.exports = {
   optionToAvailabilityRow,
   syncServiceOptionsToAvailabilityTable,
   migrateAvailabilityRowsToOptions,
+  serializeSellerOption,
 };

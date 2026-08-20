@@ -4,6 +4,7 @@ const Room = require("../models/Room");
 const User = require("../models/User");
 const Supplier = require("../models/Supplier");
 const HotelService = require("../models/HotelService");
+const ServiceOption = require("../models/ServiceOption");
 const Transaction = require("../models/Transaction");
 const SiteSetting = require("../models/SiteSetting");
 const AuditLog = require("../models/AuditLog");
@@ -252,12 +253,31 @@ const getServiceDetail = async (req, res) => {
     const business = await Hotel.findById(serviceId).lean();
     if (!business) return res.status(404).json({ message: "Service not found." });
 
-    const [provider, serviceOptions] = await Promise.all([
+    const [provider, nestedServices, options] = await Promise.all([
       loadProviderForBusiness(business),
       HotelService.find({ hotelId: business._id }).sort({ createdAt: 1 }).lean(),
+      ServiceOption.find({ serviceId: business._id }).sort({ sortOrder: 1, createdAt: 1 }).lean(),
     ]);
 
-    const service = serializeAdminServiceDetail(business, { provider, serviceOptions });
+    const service = serializeAdminServiceDetail(business, {
+      provider,
+      serviceOptions: nestedServices,
+    });
+    service.options = options.map((option) => ({
+      _id: option._id,
+      id: option._id,
+      name: option.name,
+      price: option.price,
+      currency: option.currency || "RWF",
+      attributes: option.attributes || {},
+      sortOrder: option.sortOrder || 0,
+      isActive: option.isActive !== false,
+    }));
+    service.provider = provider;
+    service.providerName = provider?.name || service.providerName || "";
+    service.providerEmail = provider?.email || service.providerEmail || "";
+    service.providerPhone = provider?.phone || business.contactDetails?.phoneE164 || business.contactDetails?.phone || "";
+    service.sellerId = provider?.sellerId || service.sellerId || "";
     return res.json({
       service,
       business: service,
