@@ -11,6 +11,7 @@
     "migrate:images": "node src/utils/migrateImagesToCloudinary.js",
     "migrate:primary-image": "node src/utils/migratePrimaryImage.js",
     "migrate:categories": "node src/utils/migrateServiceCategories.js",
+    "migrate:clear-option-schedule": "node src/utils/migrateClearOptionSchedule.js",
     "seed:categories": "node -e \"require('./src/config/db')().then(()=>require('./src/utils/ensureCategories').ensureSeededCategories()).then((r)=>{console.log(r);process.exit(0)}).catch((e)=>{console.error(e);process.exit(1)})\"",
     "verify:images": "node src/utils/verifyImageStorage.js",
     "test": "node --test test"

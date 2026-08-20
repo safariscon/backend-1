@@ -180,7 +180,9 @@ const sanitizeUnknownCellValue = (value) => {
 
 const normalizeAvailabilityCells = (rawCells = {}) => {
   const source = rawCells && typeof rawCells === "object" && !Array.isArray(rawCells) ? rawCells : {};
-  const availableDays = normalizeAvailableDays(source.availableDays);
+  let availableDays = normalizeAvailableDays(source.availableDays);
+  // Full Mon–Sun was a legacy auto-default, not an intentional restriction.
+  if (availableDays.length === WEEKDAY_ORDER.length) availableDays = [];
   const cells = {
     service: String(source.service ?? source.optionName ?? "").trim(),
     price: String(source.price ?? "").replace(/[^0-9]/g, "").trim(),
@@ -264,7 +266,8 @@ const windowMessage = (option) => {
 
 const weekdayMessage = (isoDate, option) => {
   const day = WEEKDAY_LABELS[weekdayKey(isoDate)] || isoDate;
-  const allowed = option.availableDaysList.map((key) => WEEKDAY_LABELS[key] || key).join(", ");
+  const allowedKeys = normalizeAvailableDays(option.availableDaysList || option.availableDays);
+  const allowed = allowedKeys.map((key) => WEEKDAY_LABELS[key] || key).join(", ");
   return `This option is not available on ${day}. Available days: ${allowed}.`;
 };
 
@@ -286,16 +289,23 @@ const validateBookingSchedule = ({ option, startDate, endDate, startTime, endTim
     resolvedEnd = resolvedStart;
   }
 
-  if (option?.availableFrom && option?.availableTo && option.availableFrom > option.availableTo) {
-    // Ignore inverted windows so older/bad data does not block bookings.
-  } else if (dateOutsideWindow(resolvedStart, option) || dateOutsideWindow(resolvedEnd, option)) {
-    return failSchedule(windowMessage(option));
+  // Only enforce date windows when the seller/admin explicitly configured them.
+  const hasDateWindow = Boolean(option?.availableFrom || option?.availableTo);
+  if (hasDateWindow) {
+    if (option?.availableFrom && option?.availableTo && option.availableFrom > option.availableTo) {
+      // Ignore inverted windows so older/bad data does not block bookings.
+    } else if (dateOutsideWindow(resolvedStart, option) || dateOutsideWindow(resolvedEnd, option)) {
+      return failSchedule(windowMessage(option));
+    }
   }
 
   const allowedDays = Array.isArray(option?.availableDaysList)
-    ? option.availableDaysList
+    ? normalizeAvailableDays(option.availableDaysList)
     : normalizeAvailableDays(option?.availableDays);
-  if (allowedDays.length) {
+  // Empty = unrestricted. Full Mon–Sun auto-defaults also count as unrestricted
+  // (sellers no longer configure weekdays unless admin adds them as custom attributes).
+  const hasExplicitDayRestriction = allowedDays.length > 0 && allowedDays.length < WEEKDAY_ORDER.length;
+  if (hasExplicitDayRestriction) {
     const occupiedDates =
       option?.durationUnit === "nights" && resolvedEnd > resolvedStart
         ? eachIsoDate(resolvedStart, resolvedEnd, { exclusiveEnd: true })
@@ -314,7 +324,9 @@ const validateBookingSchedule = ({ option, startDate, endDate, startTime, endTim
     return failSchedule("Provide both start time and end time, or leave both empty for an all-day booking.");
   }
 
-  if (resolvedStartTime && resolvedEndTime) {
+  // Opening-hours checks only when explicit open/close times were configured.
+  const hasOpenHours = Boolean(option?.availableStartTime || option?.availableEndTime);
+  if (hasOpenHours && resolvedStartTime && resolvedEndTime) {
     const open = timeToMinutes(option?.availableStartTime);
     const close = timeToMinutes(option?.availableEndTime);
     const startMinutes = timeToMinutes(resolvedStartTime);
@@ -330,6 +342,12 @@ const validateBookingSchedule = ({ option, startDate, endDate, startTime, endTim
       );
     }
     if (resolvedStart === resolvedEnd && endMinutes <= startMinutes) {
+      return failSchedule("End time must be after start time.");
+    }
+  } else if (resolvedStartTime && resolvedEndTime && resolvedStart === resolvedEnd) {
+    const startMinutes = timeToMinutes(resolvedStartTime);
+    const endMinutes = timeToMinutes(resolvedEndTime);
+    if (endMinutes <= startMinutes) {
       return failSchedule("End time must be after start time.");
     }
   }

@@ -17,6 +17,8 @@ const { normalizeCustomerPaymentDetails } = require("../utils/payoutDetails");
 const { resolveCommissionPercentage } = require("../utils/commission");
 const { getXentripayConfig, toClientPaymentError } = require("../services/xentripayService");
 const { validateAttributesAgainstSchema } = require("../utils/fieldSchema");
+const ServiceCategory = require("../models/ServiceCategory");
+const ServiceOption = require("../models/ServiceOption");
 const {
   startCollection,
   refreshCollection,
@@ -44,6 +46,7 @@ const {
   applyPromotionToQuote,
   getActivePromotion,
   validateBookingSchedule,
+  normalizeAvailableDays,
 } = require("../services/automaticBookingService");
 
 const publicFrontendUrl = () =>
@@ -111,23 +114,79 @@ const getPaidDepositAmount = (booking) => {
 const calculateRefundAmount = (booking, refundPercentOfDeposit) =>
   Math.round((getPaidDepositAmount(booking) * Math.max(0, Number(refundPercentOfDeposit || 0))) / 100);
 
-const normalizeCustomerLocationDetails = (value = {}) => ({
-  province: cleanText(value.province, 120),
-  district: cleanText(value.district, 120),
-  sector: cleanText(value.sector, 120),
-  cell: cleanText(value.cell, 120),
-  village: cleanText(value.village, 120),
-});
+const normalizeCustomerLocationDetails = (value = {}) => {
+  const latitudeRaw =
+    value.latitudeRaw != null && String(value.latitudeRaw).trim()
+      ? String(value.latitudeRaw).trim()
+      : value.latitude != null
+        ? String(value.latitude).trim()
+        : "";
+  const longitudeRaw =
+    value.longitudeRaw != null && String(value.longitudeRaw).trim()
+      ? String(value.longitudeRaw).trim()
+      : value.longitude != null
+        ? String(value.longitude).trim()
+        : "";
+  const latitude = Number(latitudeRaw);
+  const longitude = Number(longitudeRaw);
+  const state = cleanText(value.state || value.province, 120);
+  const city = cleanText(value.city || value.district, 120);
+  const area = cleanText(value.area || value.sector, 120);
+  const country = cleanText(value.country, 120) || "Rwanda";
+  const countryCode = cleanText(value.countryCode, 8).toUpperCase() || "RW";
+  const formattedAddress = cleanText(value.formattedAddress || value.fullAddress || value.address, 500);
 
-const formatCustomerLocation = (details) =>
-  [
-    details.village,
-    details.cell,
-    details.sector,
-    details.district,
-    details.province,
-    "Rwanda",
-  ].filter(Boolean).join(", ");
+  return {
+    country,
+    countryCode,
+    state,
+    city,
+    province: cleanText(value.province, 120) || state,
+    district: cleanText(value.district, 120) || city,
+    sector: cleanText(value.sector, 120) || area,
+    area,
+    cell: cleanText(value.cell, 120),
+    village: cleanText(value.village, 120),
+    placeName: cleanText(value.placeName || value.name, 200),
+    formattedAddress,
+    fullAddress: cleanText(value.fullAddress, 500) || formattedAddress,
+    latitude: Number.isFinite(latitude) ? latitude : null,
+    longitude: Number.isFinite(longitude) ? longitude : null,
+    latitudeRaw,
+    longitudeRaw,
+    placeId: cleanText(value.placeId, 200),
+    locationSource: cleanText(value.locationSource, 40) || "map_click",
+  };
+};
+
+const formatCustomerLocation = (details = {}) => {
+  if (details.formattedAddress) return details.formattedAddress;
+  if (details.fullAddress) return details.fullAddress;
+  const named = [
+    details.placeName,
+    details.area || details.sector,
+    details.city || details.district,
+    details.state || details.province,
+    details.country || "Rwanda",
+  ]
+    .filter(Boolean)
+    .join(", ");
+  if (named) return named;
+  if (Number.isFinite(details.latitude) && Number.isFinite(details.longitude)) {
+    return `${details.latitude}, ${details.longitude}`;
+  }
+  return "";
+};
+
+const assertCustomerMapPin = (details = {}) => {
+  if (!Number.isFinite(details.latitude) || !Number.isFinite(details.longitude)) {
+    return {
+      ok: false,
+      message: "Customer map location (latitude/longitude) is required.",
+    };
+  }
+  return { ok: true };
+};
 
 const formatBookingDateLabel = (value) => {
   if (!value) return "";
@@ -396,9 +455,9 @@ const createBookingRequest = async (req, res) => {
     );
     const details = {
       ...rawDetails,
-      fullName: cleanText(rawDetails.fullName, 120),
-      phone: cleanText(rawDetails.phone, 40),
-      email: cleanText(rawDetails.email, 160).toLowerCase(),
+      fullName: cleanText(rawDetails.fullName || req.user?.name, 120),
+      phone: cleanText(rawDetails.phone || req.user?.phone, 40),
+      email: cleanText(rawDetails.email || req.user?.email, 160).toLowerCase(),
       customerLocation: normalizedCustomerLocation,
       customerLocationDetails: normalizedCustomerLocationDetails,
       specialRequests: cleanText(rawDetails.specialRequests, 1000),
@@ -411,16 +470,41 @@ const createBookingRequest = async (req, res) => {
           }))
         : [],
     };
+
+    const pinCheck = assertCustomerMapPin(normalizedCustomerLocationDetails);
+    if (!pinCheck.ok) {
+      return res.status(400).json({ message: pinCheck.message });
+    }
+    if (!details.customerLocation) {
+      details.customerLocation = formatCustomerLocation(normalizedCustomerLocationDetails);
+    }
+
+    if (!details.fullName) {
+      return res.status(400).json({ message: "Full name is required." });
+    }
+    if (!/^\+[1-9]\d{7,14}$/.test(String(details.phone || "").replace(/[\s-]/g, "")) &&
+        !/^\+?[0-9][0-9\s-]{7,18}$/.test(details.phone)) {
+      return res.status(400).json({ message: "A valid phone number is required." });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(details.email)) {
+      return res.status(400).json({ message: "A valid email is required." });
+    }
+
     const resolvedDestinationPlace = String(
       destinationPlace || details.vehicleType || details.serviceName || "Car rental booking"
     ).trim();
     const resolvedDestinationLocation = String(
-      destinationLocation || details.returnLocation || details.pickupLocation || "Rwanda"
+      destinationLocation ||
+        details.returnLocation ||
+        details.pickupLocation ||
+        normalizedCustomerLocationDetails.formattedAddress ||
+        formatCustomerLocation(normalizedCustomerLocationDetails) ||
+        "Rwanda"
     ).trim();
 
-    if (!resolvedDestinationPlace || !resolvedDestinationLocation) {
+    if (!resolvedDestinationPlace) {
       return res.status(400).json({
-        message: "Booking location details are required.",
+        message: "Booking destination/service title is required.",
       });
     }
 
@@ -447,20 +531,31 @@ const createBookingRequest = async (req, res) => {
       }
       preferredHotelId = hotel._id;
       selectedBusiness = hotel;
-      const bookingSchema = hotel.schemaSnapshot?.bookingFieldSchema || [];
-      if (bookingSchema.length) {
-        const bookingAttrs = validateAttributesAgainstSchema(
-          req.body.bookingAttributes || rawDetails.bookingAttributes || {},
-          bookingSchema,
-          { label: "bookingAttributes" }
-        );
-        if (!bookingAttrs.ok) {
-          return res.status(400).json({ message: bookingAttrs.message, errors: bookingAttrs.errors });
-        }
-        details.bookingAttributes = bookingAttrs.attributes;
-      } else if (req.body.bookingAttributes || rawDetails.bookingAttributes) {
-        details.bookingAttributes = req.body.bookingAttributes || rawDetails.bookingAttributes;
+
+      // Admin-defined booking fields drive required/optional validation per category.
+      let bookingSchema = Array.isArray(hotel.schemaSnapshot?.bookingFieldSchema)
+        ? hotel.schemaSnapshot.bookingFieldSchema
+        : [];
+      if (!bookingSchema.length && hotel.categoryId) {
+        const liveCategory = await ServiceCategory.findById(hotel.categoryId)
+          .select("bookingFieldSchema")
+          .lean();
+        bookingSchema = liveCategory?.bookingFieldSchema || [];
       }
+      const bookingAttrs = validateAttributesAgainstSchema(
+        req.body.bookingAttributes || rawDetails.bookingAttributes || {},
+        bookingSchema,
+        { label: "bookingAttributes" }
+      );
+      if (!bookingAttrs.ok) {
+        return res.status(400).json({
+          message: bookingAttrs.message,
+          errors: bookingAttrs.errors,
+          code: "BOOKING_ATTRIBUTES_INVALID",
+        });
+      }
+      details.bookingAttributes = bookingAttrs.attributes;
+
       const now = new Date();
       const promotion = getActivePromotion(hotel.promotion, now);
       if (promotion) {
@@ -481,18 +576,7 @@ const createBookingRequest = async (req, res) => {
       });
       anonymousBusinessName = createGuestName(hotel.type, categoryPosition || 1);
     }
-    const hasCompleteCustomerLocation = [
-      "province",
-      "district",
-      "sector",
-      "cell",
-      "village",
-    ].every((field) => normalizedCustomerLocationDetails[field]);
-    if (!hasCompleteCustomerLocation) {
-      return res.status(400).json({
-        message: "Customer province, district, sector, cell, and village are required.",
-      });
-    }
+
     const normalizedBookingDateValue =
       bookingDate ||
       req.body.startDate ||
@@ -521,6 +605,71 @@ const createBookingRequest = async (req, res) => {
     let paymentStatus = "unpaid";
     if (selectedBusiness) {
       selectedOption = findSelectedServiceOption(selectedBusiness, req.body, rawDetails);
+
+      // Prefer ServiceOption collection id when frontend sends optionId.
+      const requestedOptionId = String(
+        req.body.optionId || rawDetails.selectedOptionId || rawDetails.optionId || ""
+      ).trim();
+      if (requestedOptionId && /^[a-f0-9]{24}$/i.test(requestedOptionId)) {
+        const dbOption = await ServiceOption.findOne({
+          _id: requestedOptionId,
+          serviceId: selectedBusiness._id,
+          isActive: true,
+        }).lean();
+        if (dbOption) {
+          // Normalize weekdays (Mon → mon). Full Mon–Sun / empty = no day restriction
+          // (sellers no longer configure availability days on options).
+          const days = normalizeAvailableDays(dbOption.availableDays);
+          const unrestrictedDays = days.length === 0 || days.length === 7;
+          selectedOption = {
+            id: String(dbOption._id),
+            name: dbOption.name,
+            price: Number(dbOption.price || 0),
+            priceType: dbOption.priceType || "fixed",
+            calculationField: dbOption.calculationField || "quantity",
+            durationUnit: dbOption.durationUnit || "",
+            maximumDuration: dbOption.maximumDuration,
+            availability: Math.max(1, Number(dbOption.capacity || 1)),
+            availableFrom: dbOption.availableFrom || "",
+            availableTo: dbOption.availableTo || "",
+            availableDays: unrestrictedDays ? "" : days.join(","),
+            availableDaysList: unrestrictedDays ? [] : days,
+            availableStartTime: dbOption.availableStartTime || "",
+            availableEndTime: dbOption.availableEndTime || "",
+            requiresTime: Boolean(dbOption.requiresTime),
+            details: dbOption.details || "",
+          };
+        }
+      }
+
+      if (selectedBusiness.supportsOptions !== false) {
+        if (!selectedOption) {
+          return res.status(400).json({
+            message: "Select a package/option for this service.",
+            code: "OPTION_REQUIRED",
+          });
+        }
+      } else if (!selectedOption) {
+        // Option-less category: use service basePrice as the single priced offer.
+        selectedOption = {
+          id: "default",
+          name: selectedBusiness.name || details.requestedService || "Service",
+          price: Math.max(0, Number(selectedBusiness.basePrice || rawDetails.listedPriceRwf || 0)),
+          priceType: "fixed",
+          calculationField: "quantity",
+          durationUnit: "",
+          maximumDuration: 0,
+          availability: Math.max(1, Number(selectedBusiness.quantityRemaining || selectedBusiness.availableQuantity || 1)),
+          availableFrom: "",
+          availableTo: "",
+          availableDays: "",
+          availableDaysList: [],
+          availableStartTime: "",
+          availableEndTime: "",
+          requiresTime: false,
+          details: "",
+        };
+      }
     }
 
     const schedule = validateBookingSchedule({
@@ -539,12 +688,17 @@ const createBookingRequest = async (req, res) => {
     details.endDate = schedule.endDate;
     details.startTime = schedule.startTime;
     details.endTime = schedule.endTime;
+    if (selectedOption?.id) {
+      details.selectedOptionId = selectedOption.id;
+      details.requestedService = selectedOption.name || details.requestedService;
+      details.listedPriceRwf = Number(selectedOption.price || details.listedPriceRwf || 0);
+    }
     const normalizedBookingDate = new Date(`${schedule.startDate}T12:00:00Z`);
     const normalizedEndBookingDate = new Date(`${schedule.endDate}T12:00:00Z`);
 
     if (effectiveMode === "automatic") {
       if (!selectedBusiness) return res.status(400).json({ message: "Select a service before using automatic booking." });
-      if (!isAutomaticReady(selectedBusiness, selectedOption)) {
+      if (!isAutomaticReady(selectedBusiness, selectedOption) && selectedOption?.id !== "default") {
         return res.status(409).json({
           message: "Automatic booking is not ready for this option. The seller must add a clear price type, calculation field, duration unit, and availability.",
         });
@@ -555,25 +709,59 @@ const createBookingRequest = async (req, res) => {
       const people = bookingPeople;
       const units = bookingQuantity;
       const capacityNeeded = totalConsumptionUnits;
-      if (capacityNeeded > selectedOption.availability) {
+      const optionCapacity = Math.max(1, Number(selectedOption?.availability || 1));
+      if (capacityNeeded > optionCapacity) {
         return res.status(409).json({ message: "This service is not available for the selected date, time, or quantity. Please choose another option." });
       }
-      const reserved = await Hotel.findOneAndUpdate(
-        {
-          _id: selectedBusiness._id,
-          approvalStatus: "approved",
-          status: "available",
-          "availabilityTable.rows": { $elemMatch: { id: selectedOption.id, "cells.availability": { $gte: capacityNeeded } } },
-        },
-        { $inc: { "availabilityTable.rows.$[option].cells.availability": -capacityNeeded } },
-        { returnDocument: "after", arrayFilters: [{ "option.id": selectedOption.id }] }
+
+      const hasAvailabilityRow = (selectedBusiness.availabilityTable?.rows || []).some(
+        (row) => String(row.id) === String(selectedOption.id)
       );
-      if (!reserved) {
-        return res.status(409).json({ message: "This service is not available for the selected date, time, or quantity. Please choose another option." });
+      if (hasAvailabilityRow) {
+        const reserved = await Hotel.findOneAndUpdate(
+          {
+            _id: selectedBusiness._id,
+            approvalStatus: "approved",
+            status: "available",
+            "availabilityTable.rows": {
+              $elemMatch: { id: selectedOption.id, "cells.availability": { $gte: capacityNeeded } },
+            },
+          },
+          { $inc: { "availabilityTable.rows.$[option].cells.availability": -capacityNeeded } },
+          { returnDocument: "after", arrayFilters: [{ "option.id": selectedOption.id }] }
+        );
+        if (!reserved) {
+          return res.status(409).json({
+            message:
+              "This service is not available for the selected date, time, or quantity. Please choose another option.",
+          });
+        }
+        reservedBusiness = selectedBusiness._id;
+        reservedOptionId = selectedOption.id;
+        reservedQuantity = capacityNeeded;
+      } else {
+        // Option-less / no engine row: reserve against service-level remaining quantity when present.
+        const reserved = await Hotel.findOneAndUpdate(
+          {
+            _id: selectedBusiness._id,
+            approvalStatus: "approved",
+            status: "available",
+            quantityRemaining: { $gte: capacityNeeded },
+          },
+          { $inc: { quantityRemaining: -capacityNeeded } },
+          { returnDocument: "after" }
+        );
+        if (!reserved && Number(selectedBusiness.quantityRemaining || 0) > 0) {
+          return res.status(409).json({
+            message:
+              "This service is not available for the selected date, time, or quantity. Please choose another option.",
+          });
+        }
+        reservedBusiness = selectedBusiness._id;
+        reservedOptionId = selectedOption.id || "default";
+        reservedQuantity = capacityNeeded;
       }
-      reservedBusiness = selectedBusiness._id;
-      reservedOptionId = selectedOption.id;
-      reservedQuantity = capacityNeeded;
+
       automaticQuote = {
         ...applyPromotionToQuote({
           quote: calculateQuote({ option: selectedOption, people, quantity: units }),

@@ -278,7 +278,19 @@ Delete / stop importing `frontend-1/src/data/serviceCategories.js`. Load from `G
 ```bash
 npm run seed:categories          # idempotent seed if empty
 npm run migrate:categories       # link existing Hotel.type → categoryId + migrate availability rows → options
+npm run migrate:clear-option-schedule  # clear legacy option weekdays/hours (sellers no longer edit these)
 ```
+
+### Availability days / times (important)
+
+Sellers and admins do **not** set `availableDays` / open-close times on options in the current category UI. Those fields are **legacy booking-engine internals** on `ServiceOption` / `availabilityTable`.
+
+- Empty `availableDays` = **any day** is allowed
+- Full Mon–Sun auto-defaults are treated as **unrestricted** (not a real restriction)
+- Day/time checks only run when a **partial** weekday list or explicit open/close times exist
+- Seller option APIs expose only: `name`, `price`, and admin `optionFieldSchema` attributes
+
+If bookings fail with `This option is not available on Friday…` while the list shows all weekdays, run `npm run migrate:clear-option-schedule` and restart the API.
 
 Seed packs included: hotel, apartment, homestay, car-rental, taxi, motorbike, tour, activity-operator, conference, event-hall, restaurant, cafe, bar, other.
 

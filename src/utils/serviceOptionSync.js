@@ -1,26 +1,32 @@
 const ServiceOption = require("../models/ServiceOption");
 const { serializeSellerOption, buildOptionEngineDefaults } = require("./serviceOptionView");
 
-const optionToAvailabilityRow = (option) => ({
-  id: String(option._id),
-  cells: {
-    service: option.name,
-    price: option.price,
-    // Engine defaults only — sellers do not configure these unless admin adds optionFieldSchema attrs.
-    priceType: option.priceType || "fixed",
-    calculationField: option.calculationField || "quantity",
-    durationUnit: option.durationUnit || "",
-    maximumDuration: option.maximumDuration,
-    availability: Math.max(1, Number(option.capacity || 1)),
-    availableFrom: option.availableFrom || "",
-    availableTo: option.availableTo || "",
-    availableDays: Array.isArray(option.availableDays) ? option.availableDays.join(",") : "",
-    availableStartTime: option.availableStartTime || "",
-    availableEndTime: option.availableEndTime || "",
-    requiresTime: Boolean(option.requiresTime),
-    details: option.details || "",
-  },
-});
+const optionToAvailabilityRow = (option) => {
+  const { normalizeAvailableDays } = require("../services/automaticBookingService");
+  const days = normalizeAvailableDays(option.availableDays);
+  // Empty or full week = unrestricted (do not write Mon–Sun into the table).
+  const availableDays = days.length > 0 && days.length < 7 ? days.join(",") : "";
+  return {
+    id: String(option._id),
+    cells: {
+      service: option.name,
+      price: option.price,
+      // Engine defaults only — sellers do not configure these unless admin adds optionFieldSchema attrs.
+      priceType: option.priceType || "fixed",
+      calculationField: option.calculationField || "quantity",
+      durationUnit: option.durationUnit || "",
+      maximumDuration: option.maximumDuration,
+      availability: Math.max(1, Number(option.capacity || 1)),
+      availableFrom: option.availableFrom || "",
+      availableTo: option.availableTo || "",
+      availableDays,
+      availableStartTime: option.availableStartTime || "",
+      availableEndTime: option.availableEndTime || "",
+      requiresTime: Boolean(option.requiresTime),
+      details: option.details || "",
+    },
+  };
+};
 
 const syncServiceOptionsToAvailabilityTable = async (serviceId) => {
   const options = await ServiceOption.find({ serviceId, isActive: true }).sort({ sortOrder: 1, createdAt: 1 }).lean();
