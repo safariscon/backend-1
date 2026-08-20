@@ -26,6 +26,20 @@ const {
   serviceLocationHasCoordinates,
 } = require("../utils/serviceLocation");
 const { normalizeServiceImages, withPrimaryImage } = require("../utils/serviceImages");
+const ServiceCategory = require("../models/ServiceCategory");
+const ServiceOption = require("../models/ServiceOption");
+const { ensureSeededCategories } = require("../utils/ensureCategories");
+const {
+  slugify,
+  validateAttributesAgainstSchema,
+  snapshotCategorySchemas,
+} = require("../utils/fieldSchema");
+const { normalizeContactDetails } = require("../utils/phoneE164");
+const { normalizeCatalogLocation } = require("../utils/catalogLocation");
+const {
+  syncServiceOptionsToAvailabilityTable,
+  migrateAvailabilityRowsToOptions,
+} = require("../utils/serviceOptionSync");
 
 const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
 const DEPOSIT_PERCENT = 30;
@@ -38,23 +52,37 @@ const buildPaymentUrl = (bookingId) => `${publicFrontendUrl()}/bookings/${encode
 const withCommissionTerms = (business) => {
   if (!business) return business;
   const data = typeof business.toObject === "function" ? business.toObject() : { ...business };
-  const percentage = Number(data.commissionPercentage ?? 5);
+  const percentage =
+    data.commissionPercentage == null || data.commissionPercentage === ""
+      ? null
+      : Number(data.commissionPercentage);
   const cancelPolicy = normalizeCancelPolicy(data);
   return {
     ...data,
     commissionPercentage: percentage,
+    platformCommissionPercent: percentage,
     cancelWindowHours: cancelPolicy.windowHours,
-    cancelPenaltyPercent: cancelPolicy.penaltyPercent,
-    commissionTerms: {
-      percentage,
-      label: `${percentage}% platform commission`,
-      description: "SafarisCon takes this commission from the full paid booking after the cancellation window closes. If the customer cancels in time, commission is half that rate on the cancellation fee only.",
-    },
+    cancelPenaltyPercent:
+      data.cancelPenaltyPercent == null ? null : cancelPolicy.penaltyPercent,
+    commissionTerms: percentage == null
+      ? {
+          percentage: null,
+          label: "Set by admin on approval",
+          description: "Platform commission is agreed and set by admin when the service is approved.",
+        }
+      : {
+          percentage,
+          label: `${percentage}% platform commission`,
+          description: "SafarisCon takes this commission from the full paid booking after the cancellation window closes. If the customer cancels in time, commission is half that rate on the cancellation fee only.",
+        },
     cancellationTerms: {
       windowHours: cancelPolicy.windowHours,
-      penaltyPercent: cancelPolicy.penaltyPercent,
-      cancelCommissionPercent: cancelCommissionPercentOf(percentage),
-      description: `Customers may cancel until ${cancelPolicy.windowHours} hours before the service. They lose ${cancelPolicy.penaltyPercent}% of what they paid. SafarisCon keeps ${cancelCommissionPercentOf(percentage)}% of that fee; the rest goes to you.`,
+      penaltyPercent: data.cancelPenaltyPercent == null ? null : cancelPolicy.penaltyPercent,
+      cancelCommissionPercent: percentage == null ? null : cancelCommissionPercentOf(percentage),
+      description:
+        data.cancelPenaltyPercent == null
+          ? "Cancel penalty % is set by admin on approval."
+          : `Customers may cancel until ${cancelPolicy.windowHours} hours before the service. They lose ${cancelPolicy.penaltyPercent}% of what they paid. SafarisCon keeps ${cancelCommissionPercentOf(percentage)}% of that fee; the rest goes to you.`,
     },
   };
 };
@@ -424,7 +452,16 @@ const deleteRoom = async (req, res) => {
 const listMyServices = async (req, res) => {
   try {
     if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
-    const businesses = await Hotel.find(sellerBusinessFilter(req)).sort({ createdAt: -1 }).lean();
+    const filter = { ...sellerBusinessFilter(req) };
+    const categoryKey = String(req.query.categoryId || req.query.categorySlug || req.query.category || "").trim();
+    if (categoryKey) {
+      if (/^[a-f0-9]{24}$/i.test(categoryKey)) filter.categoryId = categoryKey;
+      else {
+        const slug = slugify(categoryKey);
+        filter.$and = [...(filter.$and || []), { $or: [{ categorySlug: slug }, { type: slug }] }];
+      }
+    }
+    const businesses = await Hotel.find(filter).sort({ createdAt: -1 }).lean();
     const businessIds = businesses.map((business) => business._id);
 
     const services = await HotelService.find({ hotelId: { $in: businessIds } }).sort({
@@ -438,13 +475,17 @@ const listMyServices = async (req, res) => {
       ...withCommissionTerms(withPrimaryImage(business)),
       title: business.name,
       name: business.name,
-      category: business.type,
+      category: business.categorySlug || business.type,
+      categoryId: business.categoryId || null,
+      categorySlug: business.categorySlug || business.type,
       serviceType: business.type,
       status: business.status,
       approvalStatus: business.approvalStatus,
       verificationStatus: business.approvalStatus,
       availableQuantity: business.quantityRemaining ?? business.availableQuantity ?? 0,
       availabilityText: `${business.quantityRemaining ?? business.availableQuantity ?? 0} remaining`,
+      platformCommissionPercent: business.commissionPercentage,
+      cancelPenaltyPercent: business.cancelPenaltyPercent,
     }));
     const serviceListings = services.map((service) => {
       const data = typeof service.toObject === "function" ? service.toObject() : { ...service };
@@ -732,53 +773,116 @@ const upsertMyService = async (req, res) => {
   try {
     if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
 
-    const { serviceId } = req.params;
-    const { category, name, description } = req.body;
-    const title = String(req.body.title || name || "").trim();
-    if (!category || !title) {
-      return res.status(400).json({ message: "category and business name are required." });
-    }
-    const earlyPromotionInput = req.body.promotion && typeof req.body.promotion === "object"
-      ? req.body.promotion
-      : {};
-    const earlyPromotionEnabled = req.body.promotionEnabled === true || earlyPromotionInput.enabled === true;
-    const earlyPromotionPercent = Number(
-      req.body.promotionPercent ??
-      req.body.promotionPercentOfPrice ??
-      earlyPromotionInput.percent ??
-      earlyPromotionInput.promotionPercent ??
-      0
-    );
+    // Seller cannot set agreement commercial terms or booking mode.
     if (
-      earlyPromotionEnabled &&
-      (!Number.isFinite(earlyPromotionPercent) || earlyPromotionPercent <= 0 || earlyPromotionPercent > 100)
+      req.body.cancelPenaltyPercent != null ||
+      req.body.platformCommissionPercent != null ||
+      req.body.commissionPercentage != null ||
+      req.body.bookingMode != null
     ) {
-      return res.status(400).json({ message: "Promotion percent must be greater than 0 and less than or equal to 100." });
+      return res.status(403).json({
+        code: "SELLER_FORBIDDEN_FIELDS",
+        message:
+          "Sellers cannot set cancelPenaltyPercent, platformCommissionPercent/commissionPercentage, or bookingMode. Admin sets these on approval / marketplace settings.",
+      });
     }
-    const quantity = Math.max(0, Number(req.body.availableQuantity || req.body.quantityRemaining || 1));
-    const serviceLocation = normalizeServiceLocation(req.body.serviceLocation || req.body.locationDetails || {});
-    if (!serviceLocation.province || !serviceLocation.district || !serviceLocation.sector) {
-      return res.status(400).json({ message: "Province, district, and sector are required." });
+
+    const { serviceId } = req.params;
+    await ensureSeededCategories();
+
+    const title = String(req.body.title || req.body.name || "").trim();
+    const categoryKey = String(req.body.categoryId || req.body.categorySlug || req.body.category || "").trim();
+    if (!title || !categoryKey) {
+      return res.status(400).json({ message: "categoryId (or category slug) and title are required." });
     }
-    const hasExactCoordinates = serviceLocationHasCoordinates(serviceLocation);
-    if (hasExactCoordinates && !isCoordinateInsideRwanda(serviceLocation.latitude, serviceLocation.longitude)) {
+
+    const categoryFilter = /^[a-f0-9]{24}$/i.test(categoryKey)
+      ? { _id: categoryKey, isActive: true }
+      : { slug: slugify(categoryKey), isActive: true };
+    const category = await ServiceCategory.findOne(categoryFilter).lean();
+    if (!category) {
+      return res.status(400).json({ message: "Active service category not found." });
+    }
+
+    const listingValidation = validateAttributesAgainstSchema(
+      req.body.listingAttributes || {},
+      category.listingFieldSchema || [],
+      { label: "listingAttributes" }
+    );
+    if (!listingValidation.ok) {
+      return res.status(400).json({ message: listingValidation.message, errors: listingValidation.errors });
+    }
+
+    const catalogInput = req.body.location || req.body.catalogLocation || req.body.serviceLocation || {};
+    const catalogLocationResult = normalizeCatalogLocation(catalogInput);
+    // Backward-compatible Rwanda admin divisions when only serviceLocation is sent.
+    const serviceLocation = normalizeServiceLocation({
+      ...(req.body.serviceLocation || {}),
+      ...(catalogLocationResult.ok
+        ? {
+            latitude: catalogLocationResult.value.latitude,
+            longitude: catalogLocationResult.value.longitude,
+            formattedAddress: catalogLocationResult.value.formattedAddress,
+            fullAddress: catalogLocationResult.value.formattedAddress,
+            province: catalogLocationResult.value.state || req.body.serviceLocation?.province,
+            district: catalogLocationResult.value.city || req.body.serviceLocation?.district,
+            sector: catalogLocationResult.value.area || req.body.serviceLocation?.sector,
+            name: catalogLocationResult.value.placeName,
+            placeId: catalogLocationResult.value.placeId,
+            locationSource: catalogLocationResult.value.locationSource,
+            country: catalogLocationResult.value.country,
+          }
+        : {}),
+    });
+
+    if (!catalogLocationResult.ok && !serviceLocationHasCoordinates(serviceLocation)) {
+      return res.status(400).json({
+        message: catalogLocationResult.message || "Map/search location with latitude and longitude is required.",
+      });
+    }
+
+    const catalogLocation = catalogLocationResult.ok
+      ? catalogLocationResult.value
+      : {
+          latitude: serviceLocation.latitude,
+          longitude: serviceLocation.longitude,
+          latitudeRaw: String(serviceLocation.latitude),
+          longitudeRaw: String(serviceLocation.longitude),
+          formattedAddress: serviceLocation.formattedAddress || serviceLocation.fullAddress,
+          country: serviceLocation.country || "Rwanda",
+          countryCode: "RW",
+          state: serviceLocation.province || "",
+          city: serviceLocation.district || "",
+          area: serviceLocation.sector || "",
+          placeName: serviceLocation.name || "",
+          placeId: serviceLocation.placeId || "",
+          locationSource: serviceLocation.locationSource || "map_click",
+        };
+
+    if (!isCoordinateInsideRwanda(catalogLocation.latitude, catalogLocation.longitude)) {
       return res.status(400).json({ message: "Selected service location must be inside Rwanda." });
     }
+
     const locationDetails = {
-      province: serviceLocation.province,
-      district: serviceLocation.district,
-      sector: serviceLocation.sector,
-      cell: serviceLocation.cell,
-      village: serviceLocation.village,
+      province: serviceLocation.province || catalogLocation.state,
+      district: serviceLocation.district || catalogLocation.city,
+      sector: serviceLocation.sector || catalogLocation.area,
+      cell: serviceLocation.cell || "",
+      village: serviceLocation.village || "",
     };
-    const fullLocation = serviceLocation.formattedAddress || serviceLocation.fullAddress || [
-      serviceLocation.village,
-      serviceLocation.cell,
-      serviceLocation.sector,
-      serviceLocation.district,
-      serviceLocation.province,
-      "Rwanda",
-    ].filter(Boolean).join(", ");
+    if (!locationDetails.province || !locationDetails.district || !locationDetails.sector) {
+      return res.status(400).json({
+        message: "Province/state, district/city, and sector/area are required (auto-filled from geocode when possible).",
+      });
+    }
+
+    const fullLocation =
+      catalogLocation.formattedAddress ||
+      serviceLocation.formattedAddress ||
+      [locationDetails.village, locationDetails.cell, locationDetails.sector, locationDetails.district, locationDetails.province, "Rwanda"]
+        .filter(Boolean)
+        .join(", ");
+
     const registeredPayout = hasCompletePayoutDetails(req.user.payoutDetails)
       ? normalizePayoutDetails(req.user.payoutDetails)
       : { ok: false };
@@ -789,31 +893,85 @@ const upsertMyService = async (req, res) => {
           "Payout details are taken from provider registration and are not collected on the service form. Complete registration with Mobile Money or bank details first.",
       });
     }
-    const payoutDetails = registeredPayout.value;
-    const normalizedStatus = hasExactCoordinates && req.body.status !== "unavailable" ? "available" : "unavailable";
-    const availabilityTable = normalizeAvailabilityTable(req.body.availabilityTable);
-    if (!availabilityTable.rows.length) {
-      return res.status(400).json({ message: "Add at least one service and its RWF price." });
+
+    const contactResult = normalizeContactDetails({
+      ...(req.body.contactDetails && typeof req.body.contactDetails === "object" ? req.body.contactDetails : {}),
+      email: req.body.contactDetails?.email || req.user.email,
+      exactAddress: fullLocation,
+      latitude: catalogLocation.latitude,
+      longitude: catalogLocation.longitude,
+    });
+    if (!contactResult.ok) {
+      return res.status(400).json({ message: contactResult.message });
     }
-    const bookingForm = normalizeBookingForm(req.body.bookingForm);
-    const promotionInput = req.body.promotion && typeof req.body.promotion === "object"
-      ? req.body.promotion
-      : {};
+
+    const imageFields = normalizeServiceImages({
+      images: req.body.images,
+      primaryImage: req.body.primaryImage,
+      requireCover: false,
+    });
+    if (imageFields.error) {
+      return res.status(400).json({ message: imageFields.error });
+    }
+    const { images, primaryImage } = imageFields;
+
+    const quantity = Math.max(0, Number(req.body.availableQuantity || req.body.quantityRemaining || 1));
+    const hasExactCoordinates = true;
+    const normalizedStatus =
+      req.body.status === "unavailable" ? "unavailable" : hasExactCoordinates ? "available" : "unavailable";
+    const inventoryStatus = resolveInventoryStatus({
+      status: normalizedStatus,
+      quantity,
+      requestedStatus: req.body.inventoryStatus,
+    });
+
+    const availabilityTable = normalizeAvailabilityTable(req.body.availabilityTable);
+    const supportsOptions = Boolean(category.supportsOptions);
+    if (!supportsOptions && !availabilityTable.rows.length) {
+      const basePrice = Number(req.body.basePrice ?? req.body.price ?? 0);
+      if (!Number.isFinite(basePrice) || basePrice < 0) {
+        return res.status(400).json({ message: "basePrice is required when the category does not support options." });
+      }
+      availabilityTable.rows = [
+        {
+          id: "default",
+          cells: {
+            service: title,
+            price: basePrice,
+            priceType: "fixed",
+            calculationField: "quantity",
+            availability: Math.max(1, quantity || 1),
+            details: String(req.body.description || "").trim().slice(0, 2000),
+          },
+        },
+      ];
+      availabilityTable.updatedAt = new Date();
+    }
+
+    const earlyPromotionInput = req.body.promotion && typeof req.body.promotion === "object" ? req.body.promotion : {};
     const promotionPercent = Number(
       req.body.promotionPercent ??
-      req.body.promotionPercentOfPrice ??
-      promotionInput.percent ??
-      promotionInput.promotionPercent ??
-      0
+        req.body.promotionPercentOfPrice ??
+        earlyPromotionInput.percent ??
+        earlyPromotionInput.promotionPercent ??
+        0
     );
     const promotion = {
-      enabled: req.body.promotionEnabled === true || promotionInput.enabled === true,
-      title: String(req.body.promotionTitle || promotionInput.title || "").trim(),
-      description: String(req.body.promotionNote || promotionInput.note || promotionInput.description || "").trim(),
+      enabled: req.body.promotionEnabled === true || earlyPromotionInput.enabled === true,
+      title: String(req.body.promotionTitle || earlyPromotionInput.title || "").trim(),
+      description: String(
+        req.body.promotionNote || earlyPromotionInput.note || earlyPromotionInput.description || ""
+      ).trim(),
       percent: Number.isFinite(promotionPercent) ? promotionPercent : 0,
-      note: String(req.body.promotionNote || promotionInput.note || promotionInput.description || "").trim(),
-      startAt: (req.body.promotionStartAt || promotionInput.startAt) ? new Date(req.body.promotionStartAt || promotionInput.startAt) : null,
-      endAt: (req.body.promotionEndAt || promotionInput.endAt) ? new Date(req.body.promotionEndAt || promotionInput.endAt) : null,
+      note: String(req.body.promotionNote || earlyPromotionInput.note || earlyPromotionInput.description || "").trim(),
+      startAt:
+        req.body.promotionStartAt || earlyPromotionInput.startAt
+          ? new Date(req.body.promotionStartAt || earlyPromotionInput.startAt)
+          : null,
+      endAt:
+        req.body.promotionEndAt || earlyPromotionInput.endAt
+          ? new Date(req.body.promotionEndAt || earlyPromotionInput.endAt)
+          : null,
     };
     if (promotion.enabled) {
       if (!promotion.title || !promotion.startAt || !promotion.endAt) {
@@ -829,156 +987,167 @@ const upsertMyService = async (req, res) => {
         return res.status(400).json({ message: "Promotion end time must be after its start time." });
       }
     }
-    const requestDeadlineHours = Math.max(0, Math.min(2160, Number(req.body.rebookSettings?.requestDeadlineHours ?? 24)));
-    const rebookIdValidityHours = Math.max(1, Math.min(2160, Number(req.body.rebookSettings?.rebookIdValidityHours ?? 72)));
-    if (!Number.isFinite(requestDeadlineHours) || !Number.isFinite(rebookIdValidityHours)) {
-      return res.status(400).json({ message: "Enter valid Re-book deadline hours." });
-    }
+
+    const requestDeadlineHours = Math.max(
+      0,
+      Math.min(2160, Number(req.body.rebookSettings?.requestDeadlineHours ?? 24))
+    );
+    const rebookIdValidityHours = Math.max(
+      1,
+      Math.min(2160, Number(req.body.rebookSettings?.rebookIdValidityHours ?? 72))
+    );
     const rebookSettings = { requestDeadlineHours, rebookIdValidityHours };
-    const cancelPolicy = normalizeCancelPolicy(req.body.cancellationPolicy || req.body);
-    const inventoryStatus = resolveInventoryStatus({
-      status: normalizedStatus,
-      quantity,
-      requestedStatus: req.body.inventoryStatus,
-    });
-    const imageFields = normalizeServiceImages({
-      images: req.body.images,
-      primaryImage: req.body.primaryImage,
-      requireCover: true,
-    });
-    if (imageFields.error) {
-      return res.status(400).json({ message: imageFields.error });
-    }
-    const { images, primaryImage } = imageFields;
+    const suggestedCancelWindow = Number(category.defaults?.suggestedCancelWindowHours ?? 6);
+    const schemaSnapshot = snapshotCategorySchemas(category);
+    const description = String(req.body.description || "").trim();
 
-    if (serviceId) {
-      const existingBusiness = await Hotel.findOne({ _id: serviceId, ...sellerBusinessFilter(req) }).select(
-        "approvalStatus promotion"
-      );
-      if (!existingBusiness) {
-        return res.status(404).json({ message: "Business not found." });
-      }
-
-      const existingPromotion = existingBusiness.promotion || {};
-      const promotionChanged = promotion.enabled && (
-        existingPromotion.enabled !== true ||
-        existingPromotion.title !== promotion.title ||
-        existingPromotion.description !== promotion.description ||
-        Number(existingPromotion.percent || 0) !== promotion.percent ||
-        new Date(existingPromotion.startAt || 0).getTime() !== promotion.startAt.getTime() ||
-        new Date(existingPromotion.endAt || 0).getTime() !== promotion.endAt.getTime()
-      );
-      const business = await Hotel.findOneAndUpdate(
-        { _id: serviceId, ...sellerBusinessFilter(req) },
-        {
-          $set: {
-            name: title,
-            type: String(category).trim(),
-            location: fullLocation,
-            locationDetails,
-            serviceLocation,
-            description: String(description || "").trim(),
-            basePrice: 0,
-            priceText: "",
-            images,
-            primaryImage,
-            promotion,
-            rebookSettings,
-            cancelWindowHours: cancelPolicy.windowHours,
-            cancelPenaltyPercent: cancelPolicy.penaltyPercent,
-            "bookingRules.cancellationPolicy.windowHours": cancelPolicy.windowHours,
-            "bookingRules.cancellationPolicy.penaltyPercent": cancelPolicy.penaltyPercent,
-            ...(req.body.contactDetails && typeof req.body.contactDetails === "object"
-              ? {
-                  "contactDetails.phone": String(req.body.contactDetails.phone || "").trim(),
-                  "contactDetails.whatsapp": String(req.body.contactDetails.whatsapp || "").trim(),
-                  "contactDetails.exactAddress": serviceLocation.fullAddress,
-                  "contactDetails.latitude": serviceLocation.latitude,
-                  "contactDetails.longitude": serviceLocation.longitude,
-                }
-              : {}),
-            payoutDetails,
-            services: [String(category).trim()],
-            status: normalizedStatus,
-            availableQuantity: quantity,
-            quantityRemaining: quantity,
-            availabilityTable,
-            bookingForm,
-            inventoryStatus,
-            approvalStatus: hasExactCoordinates ? (existingBusiness.approvalStatus === "approved" ? "approved" : "pending") : "draft",
-          },
-          ...(promotionChanged ? {
-            $push: {
-              promotionHistory: {
-                $each: [{ ...promotion, recordedAt: new Date() }],
-                $slice: -20,
-              },
-            },
-          } : {}),
-        },
-        { returnDocument: "after", runValidators: true }
-      );
-      if (business) {
-        clearCache("public:");
-        emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "seller-business-updated", hotelId: business._id });
-        return res.json({
-          message:
-            business.approvalStatus === "approved"
-              ? "Business updated and published automatically."
-              : "Business updated and sent for admin approval.",
-          service: withPrimaryImage(business.toObject ? business.toObject() : business),
-        });
-      }
-    }
-
-    const business = await Hotel.create({
+    const sharedFields = {
       name: title,
-      type: String(category).trim(),
+      type: category.slug,
+      categoryId: category._id,
+      categorySlug: category.slug,
+      supportsOptions,
+      listingAttributes: listingValidation.attributes,
+      schemaSnapshot,
+      catalogLocation,
       location: fullLocation,
       locationDetails,
-      serviceLocation,
-      description: String(description || "").trim(),
-      basePrice: 0,
-      priceText: "",
-      amenities: [],
-      contactInfo: req.user.email,
-      contactDetails: {
-        ...(req.body.contactDetails && typeof req.body.contactDetails === "object" ? req.body.contactDetails : {}),
-        email: req.body.contactDetails?.email || req.user.email,
-        phone: req.body.contactDetails?.phone || req.user.phone || "",
-        exactAddress: serviceLocation.fullAddress,
-        latitude: serviceLocation.latitude,
-        longitude: serviceLocation.longitude,
+      serviceLocation: {
+        ...serviceLocation,
+        latitude: catalogLocation.latitude,
+        longitude: catalogLocation.longitude,
+        formattedAddress: fullLocation,
+        fullAddress: fullLocation,
+        province: locationDetails.province,
+        district: locationDetails.district,
+        sector: locationDetails.sector,
       },
-      payoutDetails,
+      description,
+      basePrice: Number(req.body.basePrice || 0) || 0,
+      priceText: "",
       images,
       primaryImage,
       promotion,
       rebookSettings,
-      cancelWindowHours: cancelPolicy.windowHours,
-      cancelPenaltyPercent: cancelPolicy.penaltyPercent,
+      contactDetails: contactResult.value,
+      contactInfo: req.user.email,
+      payoutDetails: registeredPayout.value,
+      services: [category.slug],
+      status: normalizedStatus,
+      availableQuantity: quantity,
+      quantityRemaining: quantity,
+      inventoryStatus,
+    };
+
+    if (serviceId) {
+      const existingBusiness = await Hotel.findOne({ _id: serviceId, ...sellerBusinessFilter(req) });
+      if (!existingBusiness) {
+        return res.status(404).json({ message: "Business not found." });
+      }
+
+      const criticalChanged =
+        existingBusiness.name !== title ||
+        String(existingBusiness.categorySlug || existingBusiness.type) !== category.slug ||
+        JSON.stringify(existingBusiness.listingAttributes || {}) !== JSON.stringify(listingValidation.attributes) ||
+        Number(existingBusiness.catalogLocation?.latitude) !== Number(catalogLocation.latitude) ||
+        Number(existingBusiness.catalogLocation?.longitude) !== Number(catalogLocation.longitude) ||
+        JSON.stringify(existingBusiness.images || []) !== JSON.stringify(images) ||
+        String(existingBusiness.primaryImage || "") !== String(primaryImage || "");
+
+      const nextApproval =
+        existingBusiness.approvalStatus === "approved" && !criticalChanged
+          ? "approved"
+          : "pending";
+
+      const existingPromotion = existingBusiness.promotion || {};
+      const promotionChanged =
+        promotion.enabled &&
+        (existingPromotion.enabled !== true ||
+          existingPromotion.title !== promotion.title ||
+          Number(existingPromotion.percent || 0) !== promotion.percent);
+
+      const business = await Hotel.findOneAndUpdate(
+        { _id: serviceId, ...sellerBusinessFilter(req) },
+        {
+          $set: {
+            ...sharedFields,
+            // Preserve admin-set commercial terms; sellers never overwrite them.
+            cancelWindowHours: existingBusiness.cancelWindowHours ?? suggestedCancelWindow,
+            cancelPenaltyPercent: existingBusiness.cancelPenaltyPercent,
+            commissionPercentage: existingBusiness.commissionPercentage,
+            ...(availabilityTable.rows.length ? { availabilityTable } : {}),
+            approvalStatus: nextApproval,
+          },
+          ...(promotionChanged
+            ? {
+                $push: {
+                  promotionHistory: {
+                    $each: [{ ...promotion, recordedAt: new Date() }],
+                    $slice: -20,
+                  },
+                },
+              }
+            : {}),
+        },
+        { returnDocument: "after", runValidators: true }
+      );
+
+      if (availabilityTable.rows.length) {
+        await migrateAvailabilityRowsToOptions(business);
+        await syncServiceOptionsToAvailabilityTable(business._id);
+      }
+
+      clearCache("public:");
+      emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "seller-business-updated", hotelId: business._id });
+      const options = await ServiceOption.find({ serviceId: business._id }).sort({ sortOrder: 1 }).lean();
+      return res.json({
+        message:
+          business.approvalStatus === "approved"
+            ? "Service updated."
+            : "Service updated and sent for admin approval.",
+        service: {
+          ...withPrimaryImage(business.toObject ? business.toObject() : business),
+          options,
+        },
+      });
+    }
+
+    const business = await Hotel.create({
+      ...sharedFields,
+      cancelWindowHours: suggestedCancelWindow,
+      cancelPenaltyPercent: null,
+      commissionPercentage: null,
       bookingRules: {
         cancellationPolicy: {
           type: "moderate",
-          windowHours: cancelPolicy.windowHours,
-          penaltyPercent: cancelPolicy.penaltyPercent,
+          windowHours: suggestedCancelWindow,
+          penaltyPercent: null,
         },
       },
       promotionHistory: promotion.enabled ? [{ ...promotion, recordedAt: new Date() }] : [],
-      services: [String(category).trim()],
       ownerEmail: `${req.user.sellerId || req.user._id}-${Date.now()}@seller.local`.toLowerCase(),
       sellerContactEmail: req.user.email,
       ownerUserId: req.user._id,
       supplierId: req.user.supplierId || null,
-      approvalStatus: hasExactCoordinates ? "pending" : "draft",
-      status: normalizedStatus,
-      availableQuantity: quantity,
-      quantityRemaining: quantity,
-      availabilityTable,
-      bookingForm,
+      approvalStatus: "pending",
+      availabilityTable: availabilityTable.rows.length
+        ? availabilityTable
+        : { columns: [], rows: [], updatedAt: null },
+      bookingForm: { title: "", description: "", fields: [] },
       bookingMode: "manual",
-      inventoryStatus,
+      agreementTerms: {
+        setAtApproval: false,
+        approvedBy: null,
+        approvedAt: null,
+        notes: "",
+        rejectReason: "",
+      },
     });
+
+    if (availabilityTable.rows.length) {
+      await migrateAvailabilityRowsToOptions(business);
+      await syncServiceOptionsToAvailabilityTable(business._id);
+    }
 
     if (!req.user.hotelId) {
       req.user.hotelId = business._id;
@@ -987,62 +1156,140 @@ const upsertMyService = async (req, res) => {
 
     emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "seller-business-created", hotelId: business._id });
     clearCache("public:");
+    const options = await ServiceOption.find({ serviceId: business._id }).sort({ sortOrder: 1 }).lean();
     return res.status(201).json({
-      message: "Business created and sent for admin approval.",
-      service: withPrimaryImage(business.toObject ? business.toObject() : business),
-    });
-
-    const payload = {
-      hotelId: req.body.hotelId || req.user.hotelId,
-      category: String(category).trim(),
-      name: title,
-      description: String(description || "").trim(),
-      priceModel: normalizePriceModel(req.body.priceModel),
-      availabilitySchedule: normalizeServiceSchedule(req.body.availabilitySchedule),
-      bookingIntegration: {
-        bookableWithReservation:
-          req.body.bookingIntegration?.bookableWithReservation !== false,
-        requiresSeparateConfirmation: Boolean(
-          req.body.bookingIntegration?.requiresSeparateConfirmation
-        ),
-        providerReference: String(
-          req.body.bookingIntegration?.providerReference || ""
-        ).trim(),
+      message: "Service created and sent for admin approval.",
+      service: {
+        ...withPrimaryImage(business.toObject ? business.toObject() : business),
+        options,
       },
-      isActive: req.body.isActive !== false,
-    };
-
-    const service = serviceId
-      ? await HotelService.findOneAndUpdate({ _id: serviceId, hotelId }, payload, {
-          returnDocument: "after",
-          runValidators: true,
-        })
-      : await HotelService.create(payload);
-
-    if (!service) {
-      return res.status(404).json({ message: "Service not found." });
-    }
-
-    emitHotelRealtime(hotelId, REALTIME_EVENTS.SERVICE_CHANGED, {
-      action: serviceId ? "updated" : "created",
-      serviceId: service._id,
-      hotelId,
-      isActive: service.isActive,
-      inventory: service.availabilitySchedule?.inventory,
-    });
-    emitRealtime(REALTIME_EVENTS.CATALOG_CHANGED, { reason: "service-saved", hotelId });
-
-    return res.json({
-      message: serviceId
-        ? "Service updated successfully."
-        : "Service created successfully.",
-      service,
     });
   } catch (error) {
     return res.status(500).json({
       message: "Failed to save service.",
       error: error.message,
     });
+  }
+};
+
+const getMyService = async (req, res) => {
+  try {
+    if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
+    const business = await Hotel.findOne({ _id: req.params.serviceId, ...sellerBusinessFilter(req) }).lean();
+    if (!business) return res.status(404).json({ message: "Service not found." });
+    const options = await ServiceOption.find({ serviceId: business._id }).sort({ sortOrder: 1, createdAt: 1 }).lean();
+    return res.json({
+      service: {
+        ...withCommissionTerms(withPrimaryImage(business)),
+        options,
+        category: business.categorySlug || business.type,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to fetch service.", error: error.message });
+  }
+};
+
+const listMyServiceOptions = async (req, res) => {
+  try {
+    if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
+    const business = await Hotel.findOne({ _id: req.params.serviceId, ...sellerBusinessFilter(req) }).lean();
+    if (!business) return res.status(404).json({ message: "Service not found." });
+    if (business.supportsOptions === false) {
+      return res.status(400).json({ message: "This service category does not support options." });
+    }
+    const options = await ServiceOption.find({ serviceId: business._id }).sort({ sortOrder: 1, createdAt: 1 }).lean();
+    return res.json({ options });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to list options.", error: error.message });
+  }
+};
+
+const upsertMyServiceOption = async (req, res) => {
+  try {
+    if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
+    const business = await Hotel.findOne({ _id: req.params.serviceId, ...sellerBusinessFilter(req) });
+    if (!business) return res.status(404).json({ message: "Service not found." });
+    if (business.supportsOptions === false) {
+      return res.status(400).json({ message: "This service category does not support options." });
+    }
+
+    const name = String(req.body.name || "").trim();
+    const price = Number(req.body.price);
+    if (!name || !Number.isFinite(price) || price < 0) {
+      return res.status(400).json({ message: "name and a valid price are required." });
+    }
+
+    const schema = business.schemaSnapshot?.optionFieldSchema || [];
+    const attrs = validateAttributesAgainstSchema(req.body.attributes || {}, schema, { label: "option attributes" });
+    if (!attrs.ok) return res.status(400).json({ message: attrs.message, errors: attrs.errors });
+
+    const payload = {
+      serviceId: business._id,
+      name,
+      price,
+      currency: String(req.body.currency || "RWF").trim().toUpperCase() || "RWF",
+      priceType: String(req.body.priceType || "fixed").trim(),
+      calculationField: String(req.body.calculationField || "quantity").trim(),
+      durationUnit: String(req.body.durationUnit || "").trim(),
+      maximumDuration: req.body.maximumDuration == null ? null : Number(req.body.maximumDuration),
+      capacity: Math.max(0, Number(req.body.capacity ?? req.body.availability ?? 1)),
+      availableFrom: String(req.body.availableFrom || "").trim(),
+      availableTo: String(req.body.availableTo || "").trim(),
+      availableDays: Array.isArray(req.body.availableDays)
+        ? req.body.availableDays.map((day) => String(day).trim()).filter(Boolean)
+        : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+      availableStartTime: String(req.body.availableStartTime || "").trim(),
+      availableEndTime: String(req.body.availableEndTime || "").trim(),
+      requiresTime: Boolean(req.body.requiresTime),
+      details: String(req.body.details || "").trim(),
+      attributes: attrs.attributes,
+      sortOrder: Number(req.body.sortOrder || 0),
+      isActive: req.body.isActive !== false,
+    };
+
+    let option;
+    if (req.params.optionId) {
+      option = await ServiceOption.findOneAndUpdate(
+        { _id: req.params.optionId, serviceId: business._id },
+        { $set: payload },
+        { returnDocument: "after", runValidators: true }
+      );
+      if (!option) return res.status(404).json({ message: "Option not found." });
+    } else {
+      option = await ServiceOption.create(payload);
+    }
+
+    await syncServiceOptionsToAvailabilityTable(business._id);
+    if (business.approvalStatus === "approved") {
+      business.approvalStatus = "pending";
+      await business.save();
+    }
+    clearCache("public:");
+    return res.status(req.params.optionId ? 200 : 201).json({
+      message: req.params.optionId ? "Option updated." : "Option created.",
+      option,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to save option.", error: error.message });
+  }
+};
+
+const deleteMyServiceOption = async (req, res) => {
+  try {
+    if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
+    const business = await Hotel.findOne({ _id: req.params.serviceId, ...sellerBusinessFilter(req) });
+    if (!business) return res.status(404).json({ message: "Service not found." });
+    const deleted = await ServiceOption.findOneAndDelete({
+      _id: req.params.optionId,
+      serviceId: business._id,
+    });
+    if (!deleted) return res.status(404).json({ message: "Option not found." });
+    await syncServiceOptionsToAvailabilityTable(business._id);
+    clearCache("public:");
+    return res.json({ message: "Option deleted." });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to delete option.", error: error.message });
   }
 };
 
@@ -1118,6 +1365,10 @@ module.exports = {
   listMyBookings,
   listMyRooms,
   listMyServices,
+  getMyService,
+  listMyServiceOptions,
+  upsertMyServiceOption,
+  deleteMyServiceOption,
   updateBookingStatus,
   verifyBookingCodeForCompletion,
   completeVerifiedBooking,

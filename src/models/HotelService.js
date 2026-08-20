@@ -64,8 +64,8 @@ const hotelServiceSchema = new mongoose.Schema(
       type: [String],
       default: [],
       validate: {
-        validator: (images) => Array.isArray(images) && images.length <= 3,
-        message: "A service can have no more than 3 images.",
+        validator: (images) => Array.isArray(images) && images.length <= 5,
+        message: "A service can have no more than 5 images.",
       },
     },
     primaryImage: {

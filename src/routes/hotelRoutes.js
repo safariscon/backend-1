@@ -4,6 +4,10 @@ const {
   listMyBookings,
   listMyRooms,
   listMyServices,
+  getMyService,
+  listMyServiceOptions,
+  upsertMyServiceOption,
+  deleteMyServiceOption,
   updateBookingStatus,
   verifyBookingCodeForCompletion,
   completeVerifiedBooking,
@@ -16,6 +20,7 @@ const {
 } = require("../controllers/hotelController");
 const { getMyPayoutDetails, updateMyPayoutDetails, getSellerFinance } = require("../controllers/paymentController");
 const { uploadImages } = require("../controllers/uploadController");
+const { listPublicCategories, getPublicCategory } = require("../controllers/serviceCategoryController");
 const { protect, sellerOnly } = require("../middleware/authMiddleware");
 const { imageUpload } = require("../middleware/uploadMiddleware");
 
@@ -31,8 +36,15 @@ router.post("/bookings/complete-verified", protect, sellerOnly, completeVerified
 router.get("/booking-verification/:lookup", protect, sellerOnly, verifyMyBooking);
 router.put("/bookings/:bookingId/status", protect, sellerOnly, updateBookingStatus);
 router.get("/rooms", protect, sellerOnly, listMyRooms);
+router.get("/service-categories", protect, sellerOnly, listPublicCategories);
+router.get("/service-categories/:idOrSlug", protect, sellerOnly, getPublicCategory);
 router.get("/services", protect, sellerOnly, listMyServices);
-router.post("/uploads/images", protect, sellerOnly, imageUpload.array("images", 3), uploadImages);
+router.get("/services/:serviceId", protect, sellerOnly, getMyService);
+router.get("/services/:serviceId/options", protect, sellerOnly, listMyServiceOptions);
+router.post("/services/:serviceId/options", protect, sellerOnly, upsertMyServiceOption);
+router.put("/services/:serviceId/options/:optionId", protect, sellerOnly, upsertMyServiceOption);
+router.delete("/services/:serviceId/options/:optionId", protect, sellerOnly, deleteMyServiceOption);
+router.post("/uploads/images", protect, sellerOnly, imageUpload.array("images", 5), uploadImages);
 router.post("/rooms", protect, sellerOnly, createRoom);
 router.put("/rooms/:roomId", protect, sellerOnly, updateRoom);
 router.post("/services", protect, sellerOnly, upsertMyService);

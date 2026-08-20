@@ -1,4 +1,4 @@
-const MAX_SERVICE_IMAGES = 3;
+const MAX_SERVICE_IMAGES = 5;
 
 const isHttpUrl = (value) => /^https?:\/\//i.test(String(value || "").trim());
 
@@ -25,16 +25,27 @@ const withPrimaryImage = (source = {}) => {
   };
 };
 
-const normalizeServiceImages = ({ images, primaryImage, requireCover = true } = {}) => {
+const normalizeServiceImages = ({ images, primaryImage, requireCover = false } = {}) => {
   const parsed = parseImageList(images);
-  const cover = resolvePrimaryImage({ images: parsed, primaryImage });
-  if (requireCover && !cover) {
+  const explicitPrimary = String(primaryImage || "").trim();
+  const cover = isHttpUrl(explicitPrimary)
+    ? explicitPrimary
+    : requireCover
+      ? resolvePrimaryImage({ images: parsed, primaryImage })
+      : isHttpUrl(explicitPrimary)
+        ? explicitPrimary
+        : "";
+
+  if (requireCover && !cover && !parsed[0]) {
     return { error: "A cover image is required. Provide primaryImage or images[0]." };
   }
 
-  const rest = parsed.filter((url) => url !== cover);
-  const ordered = cover ? [cover, ...rest].slice(0, MAX_SERVICE_IMAGES) : parsed.slice(0, MAX_SERVICE_IMAGES);
-  return { images: ordered, primaryImage: cover };
+  const primary = cover || "";
+  const rest = parsed.filter((url) => url !== primary);
+  const ordered = primary
+    ? [primary, ...rest].slice(0, MAX_SERVICE_IMAGES)
+    : parsed.slice(0, MAX_SERVICE_IMAGES);
+  return { images: ordered, primaryImage: primary || ordered[0] || "" };
 };
 
 module.exports = {

@@ -16,6 +16,7 @@ const { buildSellerBookingsUrl, buildCustomerBookingsUrl } = require("../utils/f
 const { normalizeCustomerPaymentDetails } = require("../utils/payoutDetails");
 const { resolveCommissionPercentage } = require("../utils/commission");
 const { getXentripayConfig, toClientPaymentError } = require("../services/xentripayService");
+const { validateAttributesAgainstSchema } = require("../utils/fieldSchema");
 const {
   startCollection,
   refreshCollection,
@@ -446,6 +447,20 @@ const createBookingRequest = async (req, res) => {
       }
       preferredHotelId = hotel._id;
       selectedBusiness = hotel;
+      const bookingSchema = hotel.schemaSnapshot?.bookingFieldSchema || [];
+      if (bookingSchema.length) {
+        const bookingAttrs = validateAttributesAgainstSchema(
+          req.body.bookingAttributes || rawDetails.bookingAttributes || {},
+          bookingSchema,
+          { label: "bookingAttributes" }
+        );
+        if (!bookingAttrs.ok) {
+          return res.status(400).json({ message: bookingAttrs.message, errors: bookingAttrs.errors });
+        }
+        details.bookingAttributes = bookingAttrs.attributes;
+      } else if (req.body.bookingAttributes || rawDetails.bookingAttributes) {
+        details.bookingAttributes = req.body.bookingAttributes || rawDetails.bookingAttributes;
+      }
       const now = new Date();
       const promotion = getActivePromotion(hotel.promotion, now);
       if (promotion) {

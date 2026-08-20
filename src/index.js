@@ -99,6 +99,13 @@ const startServer = async () => {
     setDbReady(true);
     databaseReady = true;
     await seedAdmin();
+    try {
+      const { ensureSeededCategories } = require("./utils/ensureCategories");
+      const seeded = await ensureSeededCategories();
+      if (seeded.seeded) console.log(`Seeded ${seeded.count} service categories.`);
+    } catch (seedError) {
+      console.warn("Service category seed skipped:", seedError.message);
+    }
   } catch (error) {
     setDbReady(false, error.message);
     if (requireDbOnStartup) {

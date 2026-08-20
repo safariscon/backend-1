@@ -9,6 +9,7 @@ const {
   getAnnouncement,
   getMarketplaceSettings,
 } = require("../controllers/publicController");
+const { listPublicCategories, getPublicCategory } = require("../controllers/serviceCategoryController");
 
 const router = express.Router();
 
@@ -18,6 +19,8 @@ router.get("/marketplace/suppliers", listMarketplaceSuppliers);
 router.get("/announcement", getAnnouncement);
 router.get("/marketplace-settings", getMarketplaceSettings);
 router.get("/marketplace/services", listHotelServices);
+router.get("/service-categories", listPublicCategories);
+router.get("/service-categories/:idOrSlug", getPublicCategory);
 router.get("/verify/:token", verifyBooking);
 router.get("/receipt", (_req, res) => res.status(400).json({ message: "Receipt token is required." }));
 router.get("/receipt/:token", publicReceipt);

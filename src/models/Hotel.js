@@ -50,6 +50,10 @@ const hotelSchema = new mongoose.Schema(
     contactDetails: {
       phone: { type: String, default: "", trim: true },
       whatsapp: { type: String, default: "", trim: true },
+      phoneE164: { type: String, default: "", trim: true },
+      phoneIso: { type: String, default: "", trim: true, uppercase: true },
+      whatsappE164: { type: String, default: "", trim: true },
+      whatsappIso: { type: String, default: "", trim: true, uppercase: true },
       email: { type: String, default: "", trim: true, lowercase: true },
       exactAddress: { type: String, default: "", trim: true },
       googleMapsUrl: { type: String, default: "", trim: true },
@@ -66,14 +70,62 @@ const hotelSchema = new mongoose.Schema(
       type: [String],
       default: [],
       validate: {
-        validator: (images) => Array.isArray(images) && images.length <= 3,
-        message: "A service can have no more than 3 images.",
+        validator: (images) => Array.isArray(images) && images.length <= 5,
+        message: "A service can have no more than 5 images.",
       },
     },
     primaryImage: {
       type: String,
       default: "",
       trim: true,
+    },
+    categoryId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ServiceCategory",
+      default: null,
+      index: true,
+    },
+    categorySlug: {
+      type: String,
+      default: "",
+      trim: true,
+      lowercase: true,
+      index: true,
+    },
+    supportsOptions: {
+      type: Boolean,
+      default: true,
+    },
+    listingAttributes: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
+    schemaSnapshot: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    catalogLocation: {
+      latitude: { type: Number, default: null },
+      longitude: { type: Number, default: null },
+      // High-precision geocoder strings (JS Number loses digits past ~15). Prefer these for map round-trips.
+      latitudeRaw: { type: String, default: "", trim: true },
+      longitudeRaw: { type: String, default: "", trim: true },
+      formattedAddress: { type: String, default: "", trim: true },
+      country: { type: String, default: "Rwanda", trim: true },
+      countryCode: { type: String, default: "RW", trim: true, uppercase: true },
+      state: { type: String, default: "", trim: true },
+      city: { type: String, default: "", trim: true },
+      area: { type: String, default: "", trim: true },
+      placeName: { type: String, default: "", trim: true },
+      placeId: { type: String, default: "", trim: true },
+      locationSource: { type: String, default: "search", trim: true },
+    },
+    agreementTerms: {
+      setAtApproval: { type: Boolean, default: false },
+      approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+      approvedAt: { type: Date, default: null },
+      notes: { type: String, default: "", trim: true },
+      rejectReason: { type: String, default: "", trim: true },
     },
     promotion: {
       enabled: { type: Boolean, default: false, index: true },
@@ -157,7 +209,7 @@ const hotelSchema = new mongoose.Schema(
     },
     commissionPercentage: {
       type: Number,
-      default: 5,
+      default: null,
       min: 0,
       max: 100,
     },
@@ -169,7 +221,7 @@ const hotelSchema = new mongoose.Schema(
     },
     cancelPenaltyPercent: {
       type: Number,
-      default: 20,
+      default: null,
       min: 0,
       max: 100,
     },
@@ -331,7 +383,7 @@ const hotelSchema = new mongoose.Schema(
         },
         penaltyPercent: {
           type: Number,
-          default: 20,
+          default: null,
           min: 0,
           max: 100,
         },

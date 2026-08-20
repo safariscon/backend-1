@@ -280,23 +280,87 @@ const updateBusinessVerification = async (req, res) => {
         message: "Send status as approved or rejected.",
       });
     }
-    const commissionPercentage = Math.max(0, Math.min(100, Number(req.body.commissionPercentage ?? 5)));
 
-    const business = await Hotel.findByIdAndUpdate(
-      businessId,
-      {
-        $set: {
-          approvalStatus,
-          ...(approvalStatus === "approved" ? { status: "available", commissionPercentage } : {}),
-          ...(approvalStatus === "rejected" ? { status: "unavailable" } : {}),
-        },
-        ...(approvalStatus === "approved"
-          ? { $max: { availableQuantity: 1, quantityRemaining: 1 } }
-          : {}),
-      },
-      { returnDocument: "after", runValidators: true }
-    );
-    if (!business) return res.status(404).json({ message: "Service not found." });
+    const existing = await Hotel.findById(businessId);
+    if (!existing) return res.status(404).json({ message: "Service not found." });
+
+    if (approvalStatus === "approved") {
+      const penaltyRaw = req.body.cancelPenaltyPercent ?? req.body.penaltyPercent;
+      const commissionRaw =
+        req.body.platformCommissionPercent ?? req.body.commissionPercentage ?? req.body.commissionPercent;
+      if (penaltyRaw == null || commissionRaw == null || penaltyRaw === "" || commissionRaw === "") {
+        return res.status(400).json({
+          code: "AGREEMENT_TERMS_REQUIRED",
+          message: "cancelPenaltyPercent and platformCommissionPercent are required to approve a service.",
+        });
+      }
+      const cancelPenaltyPercent = Number(penaltyRaw);
+      const commissionPercentage = Number(commissionRaw);
+      if (!Number.isFinite(cancelPenaltyPercent) || cancelPenaltyPercent < 0 || cancelPenaltyPercent > 100) {
+        return res.status(400).json({ message: "cancelPenaltyPercent must be between 0 and 100." });
+      }
+      if (!Number.isFinite(commissionPercentage) || commissionPercentage < 0 || commissionPercentage > 100) {
+        return res.status(400).json({ message: "platformCommissionPercent must be between 0 and 100." });
+      }
+
+      if (existing.supportsOptions !== false) {
+        const ServiceOption = require("../models/ServiceOption");
+        const optionCount = await ServiceOption.countDocuments({ serviceId: existing._id, isActive: true });
+        const tableRows = existing.availabilityTable?.rows?.length || 0;
+        if (optionCount < 1 && tableRows < 1) {
+          return res.status(400).json({
+            message: "Approve requires at least one active option (or legacy availability row) for this category.",
+          });
+        }
+      }
+
+      const cancelWindowHours = Math.max(
+        0,
+        Math.min(
+          2160,
+          Number(req.body.cancelWindowHours ?? existing.cancelWindowHours ?? 6)
+        )
+      );
+
+      existing.approvalStatus = "approved";
+      existing.status = "available";
+      existing.cancelPenaltyPercent = cancelPenaltyPercent;
+      existing.commissionPercentage = commissionPercentage;
+      existing.cancelWindowHours = cancelWindowHours;
+      existing.bookingRules = existing.bookingRules || {};
+      existing.bookingRules.cancellationPolicy = {
+        ...(existing.bookingRules.cancellationPolicy || {}),
+        windowHours: cancelWindowHours,
+        penaltyPercent: cancelPenaltyPercent,
+      };
+      existing.agreementTerms = {
+        setAtApproval: true,
+        approvedBy: req.user._id,
+        approvedAt: new Date(),
+        notes: String(req.body.notes || "").trim(),
+        rejectReason: "",
+      };
+      if ((existing.availableQuantity || 0) < 1) existing.availableQuantity = 1;
+      if ((existing.quantityRemaining || 0) < 1) existing.quantityRemaining = 1;
+      await existing.save();
+    } else if (approvalStatus === "rejected") {
+      existing.approvalStatus = "rejected";
+      existing.status = "unavailable";
+      existing.agreementTerms = {
+        ...(existing.agreementTerms || {}),
+        setAtApproval: false,
+        approvedBy: req.user._id,
+        approvedAt: new Date(),
+        notes: String(req.body.notes || "").trim(),
+        rejectReason: String(req.body.reason || req.body.rejectReason || "").trim(),
+      };
+      await existing.save();
+    } else {
+      existing.approvalStatus = approvalStatus;
+      await existing.save();
+    }
+
+    const business = existing;
     if (approvalStatus === "approved") {
       try {
         await business.populate("ownerUserId", "name email");

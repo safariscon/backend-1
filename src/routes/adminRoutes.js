@@ -44,6 +44,13 @@ const { imageUpload } = require("../middleware/uploadMiddleware");
 const { getMongoStorage, getCloudinaryStorage, getStorageOverview } = require("../controllers/storageController");
 const { getAnalyticsOverview, getAnalyticsServices, getAnalyticsPayments } = require("../controllers/analyticsController");
 const { listPayouts, syncPayout, getAdminFinance } = require("../controllers/paymentController");
+const {
+  listAdminCategories,
+  createAdminCategory,
+  updateAdminCategory,
+  updateAdminCategoryFields,
+  deleteAdminCategory,
+} = require("../controllers/serviceCategoryController");
 
 const router = express.Router();
 
@@ -85,6 +92,11 @@ router.put("/services/:serviceId/reject", updateBusinessVerification);
 router.put("/services/:serviceId/booking-mode", updateServiceBookingMode);
 router.put("/businesses/:businessId/verification", updateBusinessVerification);
 router.put("/businesses/:businessId/approval", updateBusinessVerification);
+router.get("/service-categories", listAdminCategories);
+router.post("/service-categories", createAdminCategory);
+router.put("/service-categories/:id", updateAdminCategory);
+router.put("/service-categories/:id/fields", updateAdminCategoryFields);
+router.delete("/service-categories/:id", deleteAdminCategory);
 router.delete("/businesses/:businessId", deleteBusiness);
 router.get("/transactions", listTransactions);
 router.get("/finance", getAdminFinance);

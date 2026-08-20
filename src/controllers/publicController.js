@@ -32,7 +32,7 @@ const listPublicHotels = async (req, res) => {
 
     const hotels = await Hotel.find(buildPublicCatalogFilter(req.query))
       .select(
-        "type location locationDetails images primaryImage promotion bookingRules bookingMode availabilityTable bookingForm approvalStatus status availableQuantity quantityRemaining inventoryStatus createdAt updatedAt"
+        "type categoryId categorySlug location locationDetails catalogLocation images primaryImage listingAttributes supportsOptions promotion bookingRules bookingMode availabilityTable bookingForm approvalStatus status availableQuantity quantityRemaining inventoryStatus commissionPercentage cancelPenaltyPercent cancelWindowHours createdAt updatedAt"
       )
       .sort({ type: 1, createdAt: 1, _id: 1 })
       .skip((page - 1) * limit)
