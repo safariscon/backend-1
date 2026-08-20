@@ -1,3 +1,5 @@
+const { withPrimaryImage } = require("./serviceImages");
+
 const CATEGORY_LABELS = [
   { match: ["car-rental", "car-rentals"], label: "Car Rental" },
   { match: ["restaurant"], label: "Restaurant" },
@@ -51,36 +53,40 @@ const getDestinationRegion = (location) => {
   return withoutCountry.at(-1) || "Rwanda";
 };
 
-const anonymizeBusiness = (business, guestName) => ({
-  _id: business._id,
-  id: business._id,
-  name: guestName,
-  displayName: guestName,
-  anonymousName: guestName,
-  isAnonymous: true,
-  type: business.type || "service",
-  category: business.type || "service",
-  location: business.locationDetails?.district || getDestinationRegion(business.location),
-  destinationLocation: business.locationDetails?.district || getDestinationRegion(business.location),
-  description: `Book this verified ${getGuestCategoryLabel(business.type).toLowerCase()} securely. Provider identity and exact details unlock after full payment.`,
-  basePrice: 0,
-  priceText: "",
-  images: Array.isArray(business.images) ? business.images.filter(Boolean) : [],
-  promotion: business.promotion || { enabled: false },
-  amenities: [],
-  services: [],
-  approvalStatus: business.approvalStatus,
-  status: business.status,
-  availableQuantity: business.availableQuantity,
-  quantityRemaining: business.quantityRemaining,
-  inventoryStatus: business.inventoryStatus,
-  bookingRules: business.bookingRules,
-  bookingMode: business.bookingMode || "manual",
-  availabilityTable: business.availabilityTable,
-  bookingForm: business.bookingForm,
-  createdAt: business.createdAt,
-  updatedAt: business.updatedAt,
-});
+const anonymizeBusiness = (business, guestName) => {
+  const { images, primaryImage } = withPrimaryImage(business);
+  return {
+    _id: business._id,
+    id: business._id,
+    name: guestName,
+    displayName: guestName,
+    anonymousName: guestName,
+    isAnonymous: true,
+    type: business.type || "service",
+    category: business.type || "service",
+    location: business.locationDetails?.district || getDestinationRegion(business.location),
+    destinationLocation: business.locationDetails?.district || getDestinationRegion(business.location),
+    description: `Book this verified ${getGuestCategoryLabel(business.type).toLowerCase()} securely. Provider identity and exact details unlock after full payment.`,
+    basePrice: 0,
+    priceText: "",
+    images,
+    primaryImage,
+    promotion: business.promotion || { enabled: false },
+    amenities: [],
+    services: [],
+    approvalStatus: business.approvalStatus,
+    status: business.status,
+    availableQuantity: business.availableQuantity,
+    quantityRemaining: business.quantityRemaining,
+    inventoryStatus: business.inventoryStatus,
+    bookingRules: business.bookingRules,
+    bookingMode: business.bookingMode || "manual",
+    availabilityTable: business.availabilityTable,
+    bookingForm: business.bookingForm,
+    createdAt: business.createdAt,
+    updatedAt: business.updatedAt,
+  };
+};
 
 const anonymizeBusinessList = (businesses = []) => {
   const counters = new Map();

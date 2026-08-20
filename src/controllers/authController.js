@@ -31,6 +31,7 @@ const {
   resolveLanguage,
 } = require("../utils/notify");
 const { REALTIME_EVENTS, emitRealtime } = require("../utils/realtime");
+const { normalizeServiceImages } = require("../utils/serviceImages");
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const OTP_LENGTH = 6;
@@ -703,7 +704,17 @@ const registerBusinessByAdmin = async (req, res) => {
     const normalizedEmail = (providerEmail || "").toLowerCase().trim();
     const normalizedDescription = (description || "").trim();
     const normalizedContactInfo = String(contactInfo || normalizedEmail || "").trim();
-    const normalizedImages = parseStringList(images).slice(0, 3);
+    const imageFields = normalizeServiceImages({
+      images: parseStringList(images),
+      primaryImage: req.body.primaryImage,
+      requireCover: true,
+    });
+    if (imageFields.error) {
+      return res.status(400).json({
+        message: "businessName, businessType, description, location, images and services are required.",
+      });
+    }
+    const normalizedImages = imageFields.images;
     const normalizedServices = parseStringList(services);
     const parsedBasePrice = Number(basePrice || 0);
     const businessConfig =
@@ -781,6 +792,7 @@ const registerBusinessByAdmin = async (req, res) => {
         email: contactDetails?.email || normalizedEmail,
       },
       images: normalizedImages,
+      primaryImage: imageFields.primaryImage,
       services: normalizedServices,
       supplierId: supplier._id,
       ownerEmail: normalizedEmail || `${supplier._id}@business.local`,

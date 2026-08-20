@@ -70,6 +70,11 @@ const hotelSchema = new mongoose.Schema(
         message: "A service can have no more than 3 images.",
       },
     },
+    primaryImage: {
+      type: String,
+      default: "",
+      trim: true,
+    },
     promotion: {
       enabled: { type: Boolean, default: false, index: true },
       title: { type: String, default: "", trim: true, maxlength: 100 },
@@ -366,12 +371,19 @@ hotelSchema.index({ approvalStatus: 1, status: 1, createdAt: -1 });
 hotelSchema.index({ ownerUserId: 1, createdAt: -1 });
 
 hotelSchema.pre("validate", function rejectInlineImages() {
-  const inlineImage = (this.images || []).find((image) =>
+  const candidates = [...(this.images || []), this.primaryImage];
+  const inlineImage = candidates.find((image) =>
     /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(String(image || ""))
   );
 
   if (inlineImage) {
     throw new Error("Inline base64 images are not allowed. Upload to Cloudinary and save the URL only.");
+  }
+});
+
+hotelSchema.pre("validate", function syncPrimaryImage() {
+  if (!this.primaryImage) {
+    this.primaryImage = Array.isArray(this.images) ? String(this.images[0] || "").trim() : "";
   }
 });
 

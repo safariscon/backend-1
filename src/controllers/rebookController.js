@@ -165,7 +165,7 @@ const runRebookExpiryCleanup = async ({ filter = {}, now = new Date() } = {}) =>
 const populateRequest = (query) => query
   .populate("customerId", "name email phone")
   .populate("sellerId", "name email sellerId")
-  .populate("serviceId", "name businessName type ownerUserId location images")
+  .populate("serviceId", "name businessName type ownerUserId location images primaryImage")
   .populate("originalBookingId", "bookingCode bookingDetails checkIn createdAt totalPrice depositAmount amountPaid paymentStatus status")
   .populate("newBookingId", "bookingCode status paymentStatus createdAt");
 

@@ -281,6 +281,7 @@ const buildLockedBusiness = (sourceBusiness, booking) => {
     description: sourceBusiness.description || "",
     services: sourceBusiness.services || [],
     images: sourceBusiness.images || [],
+    primaryImage: sourceBusiness.primaryImage || (sourceBusiness.images || [])[0] || "",
     location: locationDetails.district || sourceBusiness.location || "District available after seller updates location",
     publicLocation,
     serviceLocation: publicLocation,
@@ -1344,7 +1345,7 @@ const downloadReceipt = async (req, res) => {
   try {
     const booking = await Booking.findOne({ _id: req.params.bookingId, touristId: req.user._id })
       .populate("touristId", "name email")
-      .populate("hotelId", "name ownerEmail sellerContactEmail contactInfo contactDetails location type images description");
+      .populate("hotelId", "name ownerEmail sellerContactEmail contactInfo contactDetails location type images primaryImage description");
     if (!booking) return res.status(404).json({ message: "Booking not found." });
     if (!hasDepositPaid(booking)) {
       return res.status(400).json({ message: "Receipt is available after payment is confirmed." });
@@ -1415,8 +1416,8 @@ const listMyBookings = async (req, res) => {
 
     const bookings = await Booking.find({ touristId: req.user._id })
       .populate("touristId", "name email")
-      .populate("preferredHotelId", "name type location locationDetails serviceLocation contactInfo contactDetails ownerEmail sellerContactEmail images description availabilityTable bookingRules services")
-      .populate("hotelId", "name type location locationDetails serviceLocation contactInfo contactDetails ownerEmail sellerContactEmail images description availabilityTable bookingRules services")
+      .populate("preferredHotelId", "name type location locationDetails serviceLocation contactInfo contactDetails ownerEmail sellerContactEmail images primaryImage description availabilityTable bookingRules services")
+      .populate("hotelId", "name type location locationDetails serviceLocation contactInfo contactDetails ownerEmail sellerContactEmail images primaryImage description availabilityTable bookingRules services")
       .populate("roomId", "roomNumber type price status")
       .populate("tourHelpers", "name phone email")
       .sort({ createdAt: -1 });

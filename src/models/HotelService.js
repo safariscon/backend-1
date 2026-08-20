@@ -68,6 +68,11 @@ const hotelServiceSchema = new mongoose.Schema(
         message: "A service can have no more than 3 images.",
       },
     },
+    primaryImage: {
+      type: String,
+      default: "",
+      trim: true,
+    },
     availabilityTable: {
       columns: {
         type: [
@@ -180,5 +185,11 @@ const hotelServiceSchema = new mongoose.Schema(
 hotelServiceSchema.index({ isActive: 1, category: 1, name: 1 });
 hotelServiceSchema.index({ hotelId: 1, isActive: 1, category: 1 });
 hotelServiceSchema.index({ approvalStatus: 1, status: 1, isActive: 1 });
+
+hotelServiceSchema.pre("validate", function syncPrimaryImage() {
+  if (!this.primaryImage) {
+    this.primaryImage = Array.isArray(this.images) ? String(this.images[0] || "").trim() : "";
+  }
+});
 
 module.exports = mongoose.model("HotelService", hotelServiceSchema);

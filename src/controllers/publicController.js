@@ -32,7 +32,7 @@ const listPublicHotels = async (req, res) => {
 
     const hotels = await Hotel.find(buildPublicCatalogFilter(req.query))
       .select(
-        "type location locationDetails images promotion bookingRules bookingMode availabilityTable bookingForm approvalStatus status availableQuantity quantityRemaining inventoryStatus createdAt updatedAt"
+        "type location locationDetails images primaryImage promotion bookingRules bookingMode availabilityTable bookingForm approvalStatus status availableQuantity quantityRemaining inventoryStatus createdAt updatedAt"
       )
       .sort({ type: 1, createdAt: 1, _id: 1 })
       .skip((page - 1) * limit)
@@ -141,7 +141,7 @@ const verifyBooking = async (req, res) => {
   try {
     const booking = await Booking.findOne({ verificationToken: req.params.token })
       .populate("touristId", "name email")
-      .populate("hotelId", "name type location ownerEmail sellerContactEmail contactInfo contactDetails images description")
+      .populate("hotelId", "name type location ownerEmail sellerContactEmail contactInfo contactDetails images primaryImage description")
       .lean();
 
     if (!booking) {
@@ -176,7 +176,7 @@ const publicReceipt = async (req, res) => {
   try {
     const booking = await Booking.findOne({ verificationToken: req.params.token })
       .populate("touristId", "name email")
-      .populate("hotelId", "name ownerEmail sellerContactEmail contactInfo contactDetails location type images description");
+      .populate("hotelId", "name ownerEmail sellerContactEmail contactInfo contactDetails location type images primaryImage description");
     if (!booking) return res.status(404).send("Receipt not found.");
     if (!DEPOSIT_PAID_STATUSES.includes(booking.paymentStatus)) return res.status(400).send("Receipt is not ready.");
     if (!booking.receipt?.receiptNumber) {

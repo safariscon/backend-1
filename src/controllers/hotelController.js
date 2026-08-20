@@ -25,6 +25,7 @@ const {
   normalizeServiceLocation,
   serviceLocationHasCoordinates,
 } = require("../utils/serviceLocation");
+const { normalizeServiceImages, withPrimaryImage } = require("../utils/serviceImages");
 
 const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
 const DEPOSIT_PERCENT = 30;
@@ -434,7 +435,7 @@ const listMyServices = async (req, res) => {
       businesses.map((business) => [String(business._id), Number(business.commissionPercentage ?? 5)])
     );
     const businessListings = businesses.map((business) => ({
-      ...withCommissionTerms(business),
+      ...withCommissionTerms(withPrimaryImage(business)),
       title: business.name,
       name: business.name,
       category: business.type,
@@ -449,7 +450,7 @@ const listMyServices = async (req, res) => {
       const data = typeof service.toObject === "function" ? service.toObject() : { ...service };
       const percentage = commissionByBusiness.get(String(data.hotelId)) ?? 5;
       return {
-        ...data,
+        ...withPrimaryImage(data),
         commissionPercentage: percentage,
         commissionTerms: {
           percentage,
@@ -840,11 +841,15 @@ const upsertMyService = async (req, res) => {
       quantity,
       requestedStatus: req.body.inventoryStatus,
     });
-    const images = Array.isArray(req.body.images)
-      ? req.body.images
-          .filter((image) => /^https?:\/\//.test(String(image || "")))
-          .slice(0, 3)
-      : [];
+    const imageFields = normalizeServiceImages({
+      images: req.body.images,
+      primaryImage: req.body.primaryImage,
+      requireCover: true,
+    });
+    if (imageFields.error) {
+      return res.status(400).json({ message: imageFields.error });
+    }
+    const { images, primaryImage } = imageFields;
 
     if (serviceId) {
       const existingBusiness = await Hotel.findOne({ _id: serviceId, ...sellerBusinessFilter(req) }).select(
@@ -876,6 +881,7 @@ const upsertMyService = async (req, res) => {
             basePrice: 0,
             priceText: "",
             images,
+            primaryImage,
             promotion,
             rebookSettings,
             cancelWindowHours: cancelPolicy.windowHours,
@@ -920,7 +926,7 @@ const upsertMyService = async (req, res) => {
             business.approvalStatus === "approved"
               ? "Business updated and published automatically."
               : "Business updated and sent for admin approval.",
-          service: business,
+          service: withPrimaryImage(business.toObject ? business.toObject() : business),
         });
       }
     }
@@ -946,6 +952,7 @@ const upsertMyService = async (req, res) => {
       },
       payoutDetails,
       images,
+      primaryImage,
       promotion,
       rebookSettings,
       cancelWindowHours: cancelPolicy.windowHours,
@@ -982,7 +989,7 @@ const upsertMyService = async (req, res) => {
     clearCache("public:");
     return res.status(201).json({
       message: "Business created and sent for admin approval.",
-      service: business,
+      service: withPrimaryImage(business.toObject ? business.toObject() : business),
     });
 
     const payload = {

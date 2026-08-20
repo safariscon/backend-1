@@ -1,3 +1,5 @@
+const { withPrimaryImage } = require("./serviceImages");
+
 const toPlain = (value) => {
   if (!value) return null;
   if (typeof value.toObject === "function") return value.toObject();
@@ -90,8 +92,10 @@ const serializeMapLocation = (business = {}) => {
   };
 };
 
-const serializeImages = (business = {}) =>
-  (Array.isArray(business.images) ? business.images : []).map((url, index) => mapImage(url, index, business.name)).filter(Boolean);
+const serializeImages = (business = {}) => {
+  const { images } = withPrimaryImage(business);
+  return images.map((url, index) => mapImage(url, index, business.name)).filter(Boolean);
+};
 
 const buildReview = (business = {}, provider) => {
   const map = serializeMapLocation(business);
@@ -115,7 +119,7 @@ const buildReview = (business = {}, provider) => {
 };
 
 const serializeAdminServiceListItem = (business, provider) => {
-  const data = toPlain(business) || {};
+  const data = withPrimaryImage(toPlain(business) || {});
   const owner = serializeProvider(provider || data.ownerUserId);
   const map = serializeMapLocation(data);
   const images = serializeImages(data);
@@ -133,6 +137,7 @@ const serializeAdminServiceListItem = (business, provider) => {
     providerEmail: owner?.email || "",
     sellerId: owner?.sellerId || "",
     images: images.map((image) => image.url),
+    primaryImage: data.primaryImage || "",
     imageCount: images.length,
     locationSummary: [map.district, map.sector, map.province].filter(Boolean).join(", "),
     hasExactLocation: map.hasPin,
@@ -141,7 +146,7 @@ const serializeAdminServiceListItem = (business, provider) => {
 };
 
 const serializeAdminServiceDetail = (business, { provider, serviceOptions = [] } = {}) => {
-  const data = toPlain(business) || {};
+  const data = withPrimaryImage(toPlain(business) || {});
   const owner = serializeProvider(provider || data.ownerUserId);
   const map = serializeMapLocation(data);
   const images = serializeImages(data);
@@ -169,6 +174,7 @@ const serializeAdminServiceDetail = (business, { provider, serviceOptions = [] }
     amenities: data.amenities || [],
     images,
     imageUrls: images.map((image) => image.url),
+    primaryImage: data.primaryImage || "",
     location: data.location,
     locationDetails: data.locationDetails || {},
     serviceLocation: {
@@ -189,7 +195,7 @@ const serializeAdminServiceDetail = (business, { provider, serviceOptions = [] }
     providerName: owner?.name || "",
     providerEmail: owner?.email || "",
     sellerId: owner?.sellerId || "",
-    serviceOptions,
+    serviceOptions: serviceOptions.map((option) => withPrimaryImage(toPlain(option) || option)),
     review,
     createdAt: data.createdAt,
     updatedAt: data.updatedAt,

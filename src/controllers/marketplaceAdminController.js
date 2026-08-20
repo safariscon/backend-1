@@ -16,6 +16,7 @@ const {
   emitRealtime,
   emitUserRealtime,
 } = require("../utils/realtime");
+const { normalizeServiceImages } = require("../utils/serviceImages");
 
 const getMarketplaceOverview = async (_req, res) => {
   try {
@@ -141,6 +142,18 @@ const upsertHotelServiceByAdmin = async (req, res) => {
       });
     }
 
+    const hasImagePayload = req.body.images !== undefined || req.body.primaryImage !== undefined;
+    const imageFields = hasImagePayload
+      ? normalizeServiceImages({
+          images: req.body.images,
+          primaryImage: req.body.primaryImage,
+          requireCover: false,
+        })
+      : null;
+    if (imageFields?.error) {
+      return res.status(400).json({ message: imageFields.error });
+    }
+
     const servicePayload = {
       hotelId,
       supplierId: supplierId || null,
@@ -159,6 +172,9 @@ const upsertHotelServiceByAdmin = async (req, res) => {
           req.body.bookingIntegration?.providerReference || ""
         ).trim(),
       },
+      ...(imageFields
+        ? { images: imageFields.images, primaryImage: imageFields.primaryImage }
+        : {}),
       isActive: req.body.isActive !== false,
     };
 

@@ -9,6 +9,7 @@
     "lint": "node scripts/lint.js",
     "seed-admin": "node src/utils/seedAdmin.js",
     "migrate:images": "node src/utils/migrateImagesToCloudinary.js",
+    "migrate:primary-image": "node src/utils/migratePrimaryImage.js",
     "verify:images": "node src/utils/verifyImageStorage.js",
     "test": "node --test test"
   },
