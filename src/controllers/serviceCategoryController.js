@@ -66,6 +66,26 @@ const listAdminCategories = async (_req, res) => {
   }
 };
 
+const getAdminCategory = async (req, res) => {
+  try {
+    await ensureSeededCategories();
+    const key = String(req.params.id || req.params.idOrSlug || "").trim();
+    if (!key) {
+      return res.status(400).json({ message: "Category id or slug is required." });
+    }
+
+    const filter = /^[a-f0-9]{24}$/i.test(key) ? { _id: key } : { slug: slugify(key) };
+    const category = await ServiceCategory.findOne(filter).lean();
+    if (!category) {
+      return res.status(404).json({ message: "Category not found." });
+    }
+
+    return res.json({ category: serializeCategory(category, { includeInactive: true }) });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to fetch category.", error: error.message });
+  }
+};
+
 const createAdminCategory = async (req, res) => {
   try {
     const name = String(req.body.name || "").trim();
@@ -192,6 +212,7 @@ module.exports = {
   listPublicCategories,
   getPublicCategory,
   listAdminCategories,
+  getAdminCategory,
   createAdminCategory,
   updateAdminCategory,
   updateAdminCategoryFields,

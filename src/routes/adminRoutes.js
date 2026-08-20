@@ -46,6 +46,7 @@ const { getAnalyticsOverview, getAnalyticsServices, getAnalyticsPayments } = req
 const { listPayouts, syncPayout, getAdminFinance } = require("../controllers/paymentController");
 const {
   listAdminCategories,
+  getAdminCategory,
   createAdminCategory,
   updateAdminCategory,
   updateAdminCategoryFields,
@@ -93,6 +94,7 @@ router.put("/services/:serviceId/booking-mode", updateServiceBookingMode);
 router.put("/businesses/:businessId/verification", updateBusinessVerification);
 router.put("/businesses/:businessId/approval", updateBusinessVerification);
 router.get("/service-categories", listAdminCategories);
+router.get("/service-categories/:id", getAdminCategory);
 router.post("/service-categories", createAdminCategory);
 router.put("/service-categories/:id", updateAdminCategory);
 router.put("/service-categories/:id/fields", updateAdminCategoryFields);

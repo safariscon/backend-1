@@ -24,7 +24,7 @@ const uploadBufferToCloudinary = (file) =>
       }
     );
 
-    Readable.from(file.buffer).pipe(uploadStream);
+    Readable.from(file.buffer).pipe(uploadStream); 
   });
 
 const uploadImage = async (req, res) => {
