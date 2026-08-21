@@ -116,8 +116,46 @@ test("stale snapshot check-in is ignored when live category no longer includes i
   const result = validateAttributesAgainstSchema(
     {},
     bookingSchema,
-    { label: "bookingAttributes" }
+    { label: "bookingAttributes", appliesTo: "booking" }
   );
 
   assert.equal(result.ok, true);
+});
+
+test("validateAttributesAgainstSchema enforces required listing fields", () => {
+  const missing = validateAttributesAgainstSchema(
+    {},
+    [listingOnly],
+    { label: "listingAttributes", appliesTo: "listing" }
+  );
+  assert.equal(missing.ok, false);
+  assert.match(missing.message, /Star rating is required/);
+
+  const present = validateAttributesAgainstSchema(
+    { starRating: "3-star" },
+    [listingOnly],
+    { label: "listingAttributes", appliesTo: "listing" }
+  );
+  assert.equal(present.ok, true);
+  assert.equal(present.attributes.starRating, "3-star");
+});
+
+test("validateAttributesAgainstSchema enforces required option fields", () => {
+  const maxGuests = {
+    id: "maxGuests",
+    label: "Max guests",
+    type: "number",
+    required: true,
+    appliesTo: "option",
+    sortOrder: 1,
+    options: [],
+    validation: {},
+  };
+  const missing = validateAttributesAgainstSchema(
+    {},
+    [maxGuests],
+    { label: "option attributes", appliesTo: "option" }
+  );
+  assert.equal(missing.ok, false);
+  assert.match(missing.message, /Max guests is required/);
 });

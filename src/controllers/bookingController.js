@@ -560,7 +560,7 @@ const createBookingRequest = async (req, res) => {
       const bookingAttrs = validateAttributesAgainstSchema(
         req.body.bookingAttributes || rawDetails.bookingAttributes || {},
         bookingSchema,
-        { label: "bookingAttributes" }
+        { label: "bookingAttributes", appliesTo: "booking" }
       );
       if (!bookingAttrs.ok) {
         return res.status(400).json({

@@ -79,11 +79,16 @@ const resolveBookingFieldSchema = ({
   return filterBookingFieldSchema(snapshotBookingFieldSchema || []);
 };
 
-const validateAttributesAgainstSchema = (attributes = {}, schema = [], { label = "attributes" } = {}) => {
+const validateAttributesAgainstSchema = (attributes = {}, schema = [], { label = "attributes", appliesTo = null } = {}) => {
   const attrs = attributes && typeof attributes === "object" && !Array.isArray(attributes) ? attributes : {};
   const errors = [];
   const cleaned = {};
-  const activeSchema = filterBookingFieldSchema(schema);
+  // Schemas are usually already scoped (listing / option / booking).
+  // Optionally narrow further when callers pass a mixed schema + appliesTo.
+  const activeSchema = (Array.isArray(schema) ? schema : []).filter((field) => {
+    if (!appliesTo) return true;
+    return !field?.appliesTo || field.appliesTo === appliesTo;
+  });
 
   for (const field of activeSchema) {
     const raw = attrs[field.id];

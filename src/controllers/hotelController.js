@@ -867,7 +867,7 @@ const upsertMyService = async (req, res) => {
     const listingValidation = validateAttributesAgainstSchema(
       req.body.listingAttributes || {},
       category.listingFieldSchema || [],
-      { label: "listingAttributes" }
+      { label: "listingAttributes", appliesTo: "listing" }
     );
     if (!listingValidation.ok) {
       return res.status(400).json({ message: listingValidation.message, errors: listingValidation.errors });
@@ -1316,10 +1316,20 @@ const upsertMyServiceOption = async (req, res) => {
       return res.status(400).json({ message: "name and a valid price are required." });
     }
 
-    // Only admin-defined optionFieldSchema fields are accepted beyond name/price.
-    const schema = business.schemaSnapshot?.optionFieldSchema || [];
-    const attrs = validateAttributesAgainstSchema(req.body.attributes || {}, schema, {
+    // Prefer live category option fields so admin changes apply immediately.
+    let optionSchema = [];
+    if (business.categoryId) {
+      const liveCategory = await ServiceCategory.findById(business.categoryId)
+        .select("optionFieldSchema")
+        .lean();
+      optionSchema = liveCategory?.optionFieldSchema || [];
+    }
+    if (!optionSchema.length) {
+      optionSchema = business.schemaSnapshot?.optionFieldSchema || [];
+    }
+    const attrs = validateAttributesAgainstSchema(req.body.attributes || {}, optionSchema, {
       label: "option attributes",
+      appliesTo: "option",
     });
     if (!attrs.ok) return res.status(400).json({ message: attrs.message, errors: attrs.errors });
 
