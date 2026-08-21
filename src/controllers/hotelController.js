@@ -42,6 +42,13 @@ const {
   serializeSellerOption,
 } = require("../utils/serviceOptionSync");
 const { buildOptionEngineDefaults } = require("../utils/serviceOptionView");
+const {
+  normalizeAvailabilityPolicy,
+  findAvailability,
+  upsertAvailability,
+  serializeAvailability,
+} = require("../services/availabilityService");
+const ServiceAvailability = require("../models/ServiceAvailability");
 const User = require("../models/User");
 
 const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
@@ -1457,6 +1464,117 @@ const verifyMyBooking = async (req, res) => {
 
 const getMyHotelOverviewExport = getMyHotelOverview;
 
+const getMyServiceAvailability = async (req, res) => {
+  try {
+    if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
+    const business = await Hotel.findOne({ _id: req.params.serviceId, ...sellerBusinessFilter(req) }).lean();
+    if (!business) return res.status(404).json({ message: "Service not found." });
+
+    const optionId = req.query.optionId || req.params.optionId || null;
+    const availability = await findAvailability({
+      serviceId: business._id,
+      optionId: optionId && /^[a-f\d]{24}$/i.test(String(optionId)) ? optionId : null,
+    });
+
+    let category = null;
+    if (business.categoryId) {
+      category = await ServiceCategory.findById(business.categoryId)
+        .select("availabilityPolicy consumptionPolicy supportsOptions name")
+        .lean();
+    }
+
+    return res.json({
+      availability: serializeAvailability(availability),
+      availabilityPolicy: normalizeAvailabilityPolicy(
+        category?.availabilityPolicy || business.schemaSnapshot?.availabilityPolicy
+      ),
+      supportsOptions: business.supportsOptions !== false,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to load availability.", error: error.message });
+  }
+};
+
+const upsertMyServiceAvailability = async (req, res) => {
+  try {
+    if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
+    const business = await Hotel.findOne({ _id: req.params.serviceId, ...sellerBusinessFilter(req) });
+    if (!business) return res.status(404).json({ message: "Service not found." });
+
+    const optionIdRaw = req.body.optionId || req.params.optionId || null;
+    const optionId = optionIdRaw && /^[a-f\d]{24}$/i.test(String(optionIdRaw)) ? String(optionIdRaw) : null;
+
+    if (optionId) {
+      const option = await ServiceOption.findOne({ _id: optionId, serviceId: business._id }).lean();
+      if (!option) return res.status(404).json({ message: "Option not found." });
+    } else if (business.supportsOptions !== false && !req.body.forceServiceScope) {
+      return res.status(400).json({
+        message: "This service uses options. Set availability on each option (pass optionId).",
+        code: "OPTION_AVAILABILITY_REQUIRED",
+      });
+    }
+
+    let category = null;
+    if (business.categoryId) {
+      category = await ServiceCategory.findById(business.categoryId).select("availabilityPolicy").lean();
+    }
+    const policy = normalizeAvailabilityPolicy(
+      category?.availabilityPolicy || business.schemaSnapshot?.availabilityPolicy
+    );
+
+    const doc = await upsertAvailability({
+      serviceId: business._id,
+      optionId,
+      payload: req.body,
+      trackCapacity: policy.trackCapacity,
+    });
+
+    // Keep legacy ServiceOption schedule fields in sync for option-scoped availability.
+    if (optionId) {
+      await ServiceOption.updateOne(
+        { _id: optionId, serviceId: business._id },
+        {
+          $set: {
+            availableFrom: doc.windowStartDate || "",
+            availableTo: doc.windowEndDate || "",
+            availableDays: doc.daysOfWeek || [],
+            availableStartTime: doc.dayStartTime || "",
+            availableEndTime: doc.dayEndTime || "",
+            capacity: Number(doc.capacityTotal || 1),
+            requiresTime: Boolean(doc.dayStartTime || doc.dayEndTime),
+          },
+        }
+      );
+      await syncServiceOptionsToAvailabilityTable(business._id);
+    }
+
+    if (business.approvalStatus === "approved") {
+      business.approvalStatus = "pending";
+      await business.save();
+    }
+    clearCache("public:");
+
+    return res.json({
+      message: "Availability saved.",
+      availability: serializeAvailability(doc),
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to save availability.", error: error.message });
+  }
+};
+
+const listMyServiceAvailabilities = async (req, res) => {
+  try {
+    if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
+    const business = await Hotel.findOne({ _id: req.params.serviceId, ...sellerBusinessFilter(req) }).lean();
+    if (!business) return res.status(404).json({ message: "Service not found." });
+    const rows = await ServiceAvailability.find({ serviceId: business._id, isActive: { $ne: false } }).lean();
+    return res.json({ availabilities: rows.map(serializeAvailability) });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to list availabilities.", error: error.message });
+  }
+};
+
 module.exports = {
   getMyHotelOverview: getMyHotelOverviewExport,
   listMyBookings,
@@ -1466,6 +1584,9 @@ module.exports = {
   listMyServiceOptions,
   upsertMyServiceOption,
   deleteMyServiceOption,
+  getMyServiceAvailability,
+  upsertMyServiceAvailability,
+  listMyServiceAvailabilities,
   updateBookingStatus,
   verifyBookingCodeForCompletion,
   completeVerifiedBooking,

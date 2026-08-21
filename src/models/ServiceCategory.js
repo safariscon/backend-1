@@ -45,6 +45,30 @@ const serviceCategorySchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    /**
+     * Admin toggles: whether providers must configure availability
+     * for listing (option-less) and/or options, and which modes apply.
+     */
+    availabilityPolicy: {
+      listingRequiresAvailability: { type: Boolean, default: false },
+      optionRequiresAvailability: { type: Boolean, default: false },
+      modes: {
+        dateWindow: { type: Boolean, default: true },
+        daysOfWeek: { type: Boolean, default: true },
+        timeOfDay: { type: Boolean, default: true },
+      },
+      trackCapacity: { type: Boolean, default: true },
+    },
+    /**
+     * Admin toggles for customer consumption schedule on the booking form.
+     * bookedAt is always set by the server (now) — not configured here.
+     */
+    consumptionPolicy: {
+      requireConsumptionStartDate: { type: Boolean, default: true },
+      requireConsumptionEndDate: { type: Boolean, default: false },
+      requireConsumptionStartTime: { type: Boolean, default: false },
+      requireConsumptionEndTime: { type: Boolean, default: false },
+    },
     listingFieldSchema: {
       type: [fieldSchemaItem()],
       default: [],

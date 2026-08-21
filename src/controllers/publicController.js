@@ -290,6 +290,55 @@ const getMarketplaceSettings = async (_req, res) => {
   }
 };
 
+const getPublicServiceAvailability = async (req, res) => {
+  try {
+    const Hotel = require("../models/Hotel");
+    const ServiceCategory = require("../models/ServiceCategory");
+    const {
+      findAvailability,
+      serializeAvailability,
+      normalizeAvailabilityPolicy,
+      normalizeConsumptionPolicy,
+    } = require("../services/availabilityService");
+
+    const hotelId = req.params.hotelId;
+    const optionId = req.query.optionId || null;
+    const hotel = await Hotel.findOne({
+      _id: hotelId,
+      approvalStatus: "approved",
+      status: "available",
+    })
+      .select("categoryId supportsOptions schemaSnapshot")
+      .lean();
+    if (!hotel) return res.status(404).json({ message: "Service not found." });
+
+    let category = null;
+    if (hotel.categoryId) {
+      category = await ServiceCategory.findById(hotel.categoryId)
+        .select("availabilityPolicy consumptionPolicy supportsOptions")
+        .lean();
+    }
+
+    const availability = await findAvailability({
+      serviceId: hotel._id,
+      optionId: optionId && /^[a-f\d]{24}$/i.test(String(optionId)) ? optionId : null,
+    });
+
+    return res.json({
+      availability: serializeAvailability(availability),
+      availabilityPolicy: normalizeAvailabilityPolicy(
+        category?.availabilityPolicy || hotel.schemaSnapshot?.availabilityPolicy
+      ),
+      consumptionPolicy: normalizeConsumptionPolicy(
+        category?.consumptionPolicy || hotel.schemaSnapshot?.consumptionPolicy
+      ),
+      supportsOptions: hotel.supportsOptions !== false,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to load availability.", error: error.message });
+  }
+};
+
 module.exports = {
   listPublicHotels,
   listMarketplaceSuppliers,
@@ -299,4 +348,5 @@ module.exports = {
   publicQr,
   getAnnouncement,
   getMarketplaceSettings,
+  getPublicServiceAvailability,
 };

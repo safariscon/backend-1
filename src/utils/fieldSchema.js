@@ -168,6 +168,8 @@ const snapshotCategorySchemas = (category) => ({
   listingFieldSchema: category.listingFieldSchema || [],
   optionFieldSchema: category.optionFieldSchema || [],
   bookingFieldSchema: category.bookingFieldSchema || [],
+  availabilityPolicy: category.availabilityPolicy || null,
+  consumptionPolicy: category.consumptionPolicy || null,
   snapshottedAt: new Date(),
 });
 

@@ -8,6 +8,9 @@ const {
   listMyServiceOptions,
   upsertMyServiceOption,
   deleteMyServiceOption,
+  getMyServiceAvailability,
+  upsertMyServiceAvailability,
+  listMyServiceAvailabilities,
   updateBookingStatus,
   verifyBookingCodeForCompletion,
   completeVerifiedBooking,
@@ -44,6 +47,10 @@ router.get("/services/:serviceId/options", protect, sellerOnly, listMyServiceOpt
 router.post("/services/:serviceId/options", protect, sellerOnly, upsertMyServiceOption);
 router.put("/services/:serviceId/options/:optionId", protect, sellerOnly, upsertMyServiceOption);
 router.delete("/services/:serviceId/options/:optionId", protect, sellerOnly, deleteMyServiceOption);
+router.get("/services/:serviceId/availability", protect, sellerOnly, getMyServiceAvailability);
+router.get("/services/:serviceId/availabilities", protect, sellerOnly, listMyServiceAvailabilities);
+router.put("/services/:serviceId/availability", protect, sellerOnly, upsertMyServiceAvailability);
+router.put("/services/:serviceId/options/:optionId/availability", protect, sellerOnly, upsertMyServiceAvailability);
 router.post("/uploads/images", protect, sellerOnly, imageUpload.array("images", 5), uploadImages);
 router.post("/rooms", protect, sellerOnly, createRoom);
 router.put("/rooms/:roomId", protect, sellerOnly, updateRoom);

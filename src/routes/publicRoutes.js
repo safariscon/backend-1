@@ -8,6 +8,7 @@ const {
   publicQr,
   getAnnouncement,
   getMarketplaceSettings,
+  getPublicServiceAvailability,
 } = require("../controllers/publicController");
 const { listPublicCategories, getPublicCategory } = require("../controllers/serviceCategoryController");
 
@@ -15,6 +16,7 @@ const router = express.Router();
 
 router.get("/hotels", listPublicHotels);
 router.get("/hotels/:hotelId/services", listHotelServices);
+router.get("/hotels/:hotelId/availability", getPublicServiceAvailability);
 router.get("/marketplace/suppliers", listMarketplaceSuppliers);
 router.get("/announcement", getAnnouncement);
 router.get("/marketplace-settings", getMarketplaceSettings);

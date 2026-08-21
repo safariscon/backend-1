@@ -3,6 +3,12 @@ const Hotel = require("../models/Hotel");
 const { ensureSeededCategories } = require("../utils/ensureCategories");
 const { normalizeFieldSchema, slugify } = require("../utils/fieldSchema");
 const { clearCache } = require("../utils/cache");
+const {
+  normalizeAvailabilityPolicy,
+  normalizeConsumptionPolicy,
+  defaultAvailabilityPolicy,
+  defaultConsumptionPolicy,
+} = require("../services/availabilityService");
 
 const parseBoolean = (value, fallback = false) => {
   if (value === undefined || value === null || value === "") return fallback;
@@ -14,6 +20,9 @@ const parseBoolean = (value, fallback = false) => {
 const applySupportsOptionsSideEffects = (category) => {
   if (category.supportsOptions === false) {
     category.optionFieldSchema = [];
+    if (category.availabilityPolicy) {
+      category.availabilityPolicy.optionRequiresAvailability = false;
+    }
   }
 };
 
@@ -34,6 +43,8 @@ const syncCategoryToServices = async (category) => {
           : [],
         "schemaSnapshot.listingFieldSchema": category.listingFieldSchema || [],
         "schemaSnapshot.bookingFieldSchema": category.bookingFieldSchema || [],
+        "schemaSnapshot.availabilityPolicy": normalizeAvailabilityPolicy(category.availabilityPolicy),
+        "schemaSnapshot.consumptionPolicy": normalizeConsumptionPolicy(category.consumptionPolicy),
       },
     }
   );
@@ -46,6 +57,8 @@ const serializeCategory = (category, { includeInactive = false } = {}) => {
   return {
     ...data,
     id: data._id,
+    availabilityPolicy: normalizeAvailabilityPolicy(data.availabilityPolicy || defaultAvailabilityPolicy()),
+    consumptionPolicy: normalizeConsumptionPolicy(data.consumptionPolicy || defaultConsumptionPolicy()),
   };
 };
 
@@ -143,6 +156,8 @@ const createAdminCategory = async (req, res) => {
       isActive: req.body.isActive !== false,
       sortOrder: Number(req.body.sortOrder || 0),
       supportsOptions: parseBoolean(req.body.supportsOptions, true),
+      availabilityPolicy: normalizeAvailabilityPolicy(req.body.availabilityPolicy),
+      consumptionPolicy: normalizeConsumptionPolicy(req.body.consumptionPolicy),
       listingFieldSchema: normalizeFieldSchema(req.body.listingFieldSchema, "listing"),
       optionFieldSchema: parseBoolean(req.body.supportsOptions, true)
         ? normalizeFieldSchema(req.body.optionFieldSchema, "option")
@@ -198,6 +213,12 @@ const updateAdminCategory = async (req, res) => {
     if (Array.isArray(req.body.bookingFieldSchema)) {
       category.bookingFieldSchema = normalizeFieldSchema(req.body.bookingFieldSchema, "booking");
     }
+    if (req.body.availabilityPolicy != null) {
+      category.availabilityPolicy = normalizeAvailabilityPolicy(req.body.availabilityPolicy);
+    }
+    if (req.body.consumptionPolicy != null) {
+      category.consumptionPolicy = normalizeConsumptionPolicy(req.body.consumptionPolicy);
+    }
 
     applySupportsOptionsSideEffects(category);
     await category.save();
@@ -225,6 +246,12 @@ const updateAdminCategoryFields = async (req, res) => {
       category.bookingFieldSchema = normalizeFieldSchema(req.body.bookingFieldSchema, "booking");
     }
     if (req.body.supportsOptions != null) category.supportsOptions = parseBoolean(req.body.supportsOptions, true);
+    if (req.body.availabilityPolicy != null) {
+      category.availabilityPolicy = normalizeAvailabilityPolicy(req.body.availabilityPolicy);
+    }
+    if (req.body.consumptionPolicy != null) {
+      category.consumptionPolicy = normalizeConsumptionPolicy(req.body.consumptionPolicy);
+    }
 
     applySupportsOptionsSideEffects(category);
     await category.save();

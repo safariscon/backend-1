@@ -20,6 +20,16 @@ const { validateAttributesAgainstSchema, resolveBookingFieldSchema } = require("
 const ServiceCategory = require("../models/ServiceCategory");
 const ServiceOption = require("../models/ServiceOption");
 const {
+  normalizeAvailabilityPolicy,
+  normalizeConsumptionPolicy,
+  findAvailability,
+  buildConsumptionFromInput,
+  validateConsumptionAgainstAvailability,
+  findOverlappingPaidConsumptions,
+  createBookingConsumption,
+  markConsumptionPaidAndCaptureCapacity,
+} = require("../services/availabilityService");
+const {
   startCollection,
   refreshCollection,
   startProviderPayout,
@@ -709,7 +719,8 @@ const createBookingRequest = async (req, res) => {
       details.listedPriceRwf = Number(selectedOption.price || details.listedPriceRwf || 0);
     }
     const normalizedBookingDate = new Date(`${schedule.startDate}T12:00:00Z`);
-    const normalizedEndBookingDate = new Date(`${schedule.endDate}T12:00:00Z`);
+    let normalizedEndBookingDate = new Date(`${schedule.endDate}T12:00:00Z`);
+    let normalizedBookingDateFinal = normalizedBookingDate;
 
     if (effectiveMode === "automatic") {
       if (!selectedBusiness) return res.status(400).json({ message: "Select a service before using automatic booking." });
@@ -809,18 +820,139 @@ const createBookingRequest = async (req, res) => {
     const verificationCode = prefixedCode("VERIFY", 10);
     const verificationToken = secureToken([req.user._id, preferredHotelId, bookingCode]);
 
+    // --- Consumption schedule (separate from free-text bookingAttributes) ---
+    // bookedAt is always now. Customer provides consumption start/end based on category policy.
+    let liveCategoryForPolicies = null;
+    if (selectedBusiness?.categoryId) {
+      liveCategoryForPolicies = await ServiceCategory.findById(selectedBusiness.categoryId)
+        .select("availabilityPolicy consumptionPolicy supportsOptions")
+        .lean();
+    }
+    const availabilityPolicy = normalizeAvailabilityPolicy(
+      liveCategoryForPolicies?.availabilityPolicy || selectedBusiness?.schemaSnapshot?.availabilityPolicy
+    );
+    const consumptionPolicy = normalizeConsumptionPolicy(
+      liveCategoryForPolicies?.consumptionPolicy || selectedBusiness?.schemaSnapshot?.consumptionPolicy
+    );
+
+    const consumptionInput = req.body.consumption || rawDetails.consumption || {};
+    const builtConsumption = buildConsumptionFromInput({
+      consumptionPolicy,
+      input: consumptionInput,
+      fallbackStartDate: normalizedBookingDateValue,
+      fallbackEndDate: normalizedEndBookingDateValue,
+      fallbackStartTime: normalizedStartTime,
+      fallbackEndTime: normalizedEndTime,
+      units: totalConsumptionUnits,
+    });
+    if (!builtConsumption.ok) {
+      return res.status(400).json({
+        message: builtConsumption.message,
+        errors: builtConsumption.errors,
+        code: "CONSUMPTION_INVALID",
+      });
+    }
+
+    const optionObjectId = selectedOption?.id && /^[a-f\d]{24}$/i.test(String(selectedOption.id))
+      ? selectedOption.id
+      : (req.body.optionId && /^[a-f\d]{24}$/i.test(String(req.body.optionId)) ? req.body.optionId : null);
+
+    const requiresAvailability = selectedBusiness
+      ? (selectedBusiness.supportsOptions === false
+        ? availabilityPolicy.listingRequiresAvailability
+        : availabilityPolicy.optionRequiresAvailability)
+      : false;
+
+    let serviceAvailability = null;
+    if (selectedBusiness && requiresAvailability) {
+      serviceAvailability = await findAvailability({
+        serviceId: selectedBusiness._id,
+        optionId: selectedBusiness.supportsOptions === false ? null : optionObjectId,
+      });
+      if (!serviceAvailability) {
+        return res.status(400).json({
+          message: selectedBusiness.supportsOptions === false
+            ? "This service has no availability configured by the provider yet."
+            : "This option has no availability configured by the provider yet.",
+          code: "AVAILABILITY_MISSING",
+        });
+      }
+      const againstAvailability = validateConsumptionAgainstAvailability(
+        serviceAvailability,
+        builtConsumption.consumption
+      );
+      if (!againstAvailability.ok) {
+        return res.status(400).json({
+          message: againstAvailability.message,
+          code: "CONSUMPTION_OUTSIDE_AVAILABILITY",
+        });
+      }
+    } else if (selectedBusiness) {
+      serviceAvailability = await findAvailability({
+        serviceId: selectedBusiness._id,
+        optionId: selectedBusiness.supportsOptions === false ? null : optionObjectId,
+      });
+      if (serviceAvailability) {
+        const againstAvailability = validateConsumptionAgainstAvailability(
+          serviceAvailability,
+          builtConsumption.consumption
+        );
+        if (!againstAvailability.ok) {
+          return res.status(400).json({
+            message: againstAvailability.message,
+            code: "CONSUMPTION_OUTSIDE_AVAILABILITY",
+          });
+        }
+      }
+    }
+
+    if (selectedBusiness) {
+      const overlaps = await findOverlappingPaidConsumptions({
+        serviceId: selectedBusiness._id,
+        optionId: selectedBusiness.supportsOptions === false ? null : optionObjectId,
+        consumptionStartAt: builtConsumption.consumption.consumptionStartAt,
+        consumptionEndAt: builtConsumption.consumption.consumptionEndAt,
+      });
+      if (overlaps.length) {
+        return res.status(409).json({
+          message: "Those consumption dates overlap an existing paid booking for this service or option. Choose dates after the current booking ends.",
+          code: "CONSUMPTION_OVERLAP",
+          conflicts: overlaps.map((item) => ({
+            bookingId: item.bookingId,
+            consumptionStartDate: item.consumptionStartDate,
+            consumptionEndDate: item.consumptionEndDate,
+          })),
+        });
+      }
+    }
+
+    // Align legacy booking date fields with explicit consumption schedule.
+    normalizedBookingDateFinal = builtConsumption.consumption.consumptionStartAt;
+    normalizedEndBookingDate = builtConsumption.consumption.consumptionEndAt;
+    details.consumption = {
+      bookedAt: builtConsumption.consumption.bookedAt,
+      consumptionStartDate: builtConsumption.consumption.consumptionStartDate,
+      consumptionEndDate: builtConsumption.consumption.consumptionEndDate,
+      consumptionStartTime: builtConsumption.consumption.consumptionStartTime,
+      consumptionEndTime: builtConsumption.consumption.consumptionEndTime,
+    };
+    details.bookingDate = builtConsumption.consumption.consumptionStartDate;
+    details.endBookingDate = builtConsumption.consumption.consumptionEndDate;
+    details.startTime = builtConsumption.consumption.consumptionStartTime;
+    details.endTime = builtConsumption.consumption.consumptionEndTime;
+
     const booking = await Booking.create({
       touristId: req.user._id,
       destinationPlace: resolvedDestinationPlace,
       destinationLocation: resolvedDestinationLocation,
       preferredHotelId,
       hotelId: effectiveMode === "automatic" ? preferredHotelId : null,
-      checkIn: checkIn || normalizedBookingDate,
+      checkIn: checkIn || normalizedBookingDateFinal,
       checkOut: checkOut || normalizedEndBookingDate,
-      bookingDate: normalizedBookingDate,
+      bookingDate: normalizedBookingDateFinal,
       endBookingDate: normalizedEndBookingDate,
-      startTime: schedule.startTime,
-      endTime: schedule.endTime,
+      startTime: builtConsumption.consumption.consumptionStartTime || schedule.startTime,
+      endTime: builtConsumption.consumption.consumptionEndTime || schedule.endTime,
       guests: Number(guests) || bookingQuantity,
       numberOfPeople: bookingPeople,
       quantity: bookingQuantity,
@@ -857,7 +989,7 @@ const createBookingRequest = async (req, res) => {
         status: selectedBusiness ? "pending" : "not_required",
         requestedAt: selectedBusiness ? new Date() : null,
       },
-      serviceOptionId: selectedOption?.id || "",
+      serviceOptionId: selectedOption?.id || optionObjectId || "",
       priceSnapshot: buildPriceSnapshot({
         selectedOption,
         automaticQuote,
@@ -882,7 +1014,7 @@ const createBookingRequest = async (req, res) => {
             ...policyFromBusiness(selectedBusiness),
             cancelCommissionPercent: cancelCommissionPercentOf(resolveCommissionPercentage(selectedBusiness)),
             refundableUntil: resolveRefundableUntil(
-              { bookingDate: normalizedBookingDate, checkIn: checkIn || normalizedBookingDate, bookingDetails: details },
+              { bookingDate: normalizedBookingDateFinal, checkIn: checkIn || normalizedBookingDateFinal, bookingDetails: details },
               policyFromBusiness(selectedBusiness)
             ),
           }
@@ -899,6 +1031,18 @@ const createBookingRequest = async (req, res) => {
           : "Your request has been submitted successfully. Please wait for admin response.",
     });
     createdBooking = booking;
+
+    if (selectedBusiness) {
+      const consumptionDoc = await createBookingConsumption({
+        bookingId: booking._id,
+        serviceId: selectedBusiness._id,
+        optionId: selectedBusiness.supportsOptions === false ? null : optionObjectId,
+        consumption: builtConsumption.consumption,
+        status: rebookOriginalBooking ? "paid" : "pending",
+      });
+      booking.consumptionId = consumptionDoc._id;
+      await booking.save();
+    }
 
     if (rebookClaim) {
       try {
@@ -1097,6 +1241,36 @@ const finalizePaidBooking = async ({ booking, business, user, amount, method, pa
   ).populate("touristId", "name email");
 
   if (!paidBooking) return { paidBooking: null, transaction };
+
+  // Capture capacity on payment confirmation (ServiceAvailability.capacityRemaining).
+  try {
+    const capture = await markConsumptionPaidAndCaptureCapacity({
+      bookingId: paidBooking._id,
+      units: paidBooking.totalConsumptionUnits || paidBooking.availabilityReservation?.quantity || 1,
+    });
+    if (!capture.ok) {
+      // Payment already recorded; surface capacity conflict for ops without rolling back payment.
+      paidBooking.adminResponseMessage = [
+        paidBooking.adminResponseMessage || "",
+        capture.message || "Capacity capture failed after payment.",
+      ].filter(Boolean).join(" ");
+      await paidBooking.save();
+    }
+  } catch (_capacityError) {}
+
+  // Notify seller that payment confirmed / inventory updated.
+  try {
+    emitHotelRealtime(business?._id || paidBooking.preferredHotelId || paidBooking.hotelId, REALTIME_EVENTS.BOOKING_CHANGED, {
+      action: "paid",
+      bookingId: paidBooking._id,
+      paymentReference,
+      capacityCaptured: true,
+    });
+    emitUserRealtime(business?.userId || business?.ownerId, REALTIME_EVENTS.BOOKING_CHANGED, {
+      action: "paid",
+      bookingId: paidBooking._id,
+    });
+  } catch (_notifyError) {}
 
   transaction.status = "paid";
   transaction.collectionStatus = "success";

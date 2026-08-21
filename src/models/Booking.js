@@ -355,6 +355,13 @@ const bookingSchema = new mongoose.Schema(
       default: "",
       trim: true,
     },
+    /** Reference to BookingConsumption (explicit start/end consumption schedule) */
+    consumptionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "BookingConsumption",
+      default: null,
+      index: true,
+    },
     priceSnapshot: {
       type: mongoose.Schema.Types.Mixed,
       default: null,
