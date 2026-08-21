@@ -16,7 +16,7 @@ const { buildSellerBookingsUrl, buildCustomerBookingsUrl } = require("../utils/f
 const { normalizeCustomerPaymentDetails } = require("../utils/payoutDetails");
 const { resolveCommissionPercentage } = require("../utils/commission");
 const { getXentripayConfig, toClientPaymentError } = require("../services/xentripayService");
-const { validateAttributesAgainstSchema } = require("../utils/fieldSchema");
+const { validateAttributesAgainstSchema, resolveBookingFieldSchema } = require("../utils/fieldSchema");
 const ServiceCategory = require("../models/ServiceCategory");
 const ServiceOption = require("../models/ServiceOption");
 const {
@@ -532,16 +532,31 @@ const createBookingRequest = async (req, res) => {
       preferredHotelId = hotel._id;
       selectedBusiness = hotel;
 
-      // Admin-defined booking fields drive required/optional validation per category.
-      let bookingSchema = Array.isArray(hotel.schemaSnapshot?.bookingFieldSchema)
-        ? hotel.schemaSnapshot.bookingFieldSchema
-        : [];
-      if (!bookingSchema.length && hotel.categoryId) {
-        const liveCategory = await ServiceCategory.findById(hotel.categoryId)
+      // Admin-defined category booking fields are the source of truth for required/optional.
+      // Prefer the live category schema so stale service snapshots cannot require fields
+      // that are no longer configured for the selected category (e.g. Check-in date).
+      let liveCategory = null;
+      if (hotel.categoryId) {
+        liveCategory = await ServiceCategory.findById(hotel.categoryId)
           .select("bookingFieldSchema")
           .lean();
-        bookingSchema = liveCategory?.bookingFieldSchema || [];
       }
+      if (!liveCategory && (hotel.categorySlug || hotel.type)) {
+        liveCategory = await ServiceCategory.findOne({
+          $or: [
+            ...(hotel.categorySlug ? [{ slug: hotel.categorySlug }] : []),
+            ...(hotel.type ? [{ slug: hotel.type }] : []),
+          ],
+          isActive: { $ne: false },
+        })
+          .select("bookingFieldSchema")
+          .lean();
+      }
+      const bookingSchema = resolveBookingFieldSchema({
+        liveBookingFieldSchema: liveCategory?.bookingFieldSchema,
+        snapshotBookingFieldSchema: hotel.schemaSnapshot?.bookingFieldSchema,
+        hasLiveCategory: Boolean(liveCategory),
+      });
       const bookingAttrs = validateAttributesAgainstSchema(
         req.body.bookingAttributes || rawDetails.bookingAttributes || {},
         bookingSchema,

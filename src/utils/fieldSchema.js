@@ -56,12 +56,36 @@ const isEmptyValue = (value) => {
   return false;
 };
 
+/** Only fields configured for booking forms (ignore listing/option leftovers). */
+const filterBookingFieldSchema = (schema = []) =>
+  (Array.isArray(schema) ? schema : []).filter(
+    (field) => !field?.appliesTo || field.appliesTo === "booking"
+  );
+
+/**
+ * Category configuration is the source of truth for required booking fields.
+ * Prefer the live category schema whenever the category document was loaded
+ * (including an empty schema). Fall back to the service snapshot only when
+ * the live category cannot be resolved.
+ */
+const resolveBookingFieldSchema = ({
+  liveBookingFieldSchema,
+  snapshotBookingFieldSchema,
+  hasLiveCategory = false,
+} = {}) => {
+  if (hasLiveCategory) {
+    return filterBookingFieldSchema(liveBookingFieldSchema || []);
+  }
+  return filterBookingFieldSchema(snapshotBookingFieldSchema || []);
+};
+
 const validateAttributesAgainstSchema = (attributes = {}, schema = [], { label = "attributes" } = {}) => {
   const attrs = attributes && typeof attributes === "object" && !Array.isArray(attributes) ? attributes : {};
   const errors = [];
   const cleaned = {};
+  const activeSchema = filterBookingFieldSchema(schema);
 
-  for (const field of schema) {
+  for (const field of activeSchema) {
     const raw = attrs[field.id];
     if (isEmptyValue(raw)) {
       if (field.required) errors.push(`${field.label} is required.`);
@@ -146,6 +170,8 @@ module.exports = {
   slugify,
   normalizeFieldItem,
   normalizeFieldSchema,
+  filterBookingFieldSchema,
+  resolveBookingFieldSchema,
   validateAttributesAgainstSchema,
   snapshotCategorySchemas,
 };
