@@ -165,10 +165,12 @@ test("accommodation inventory stores beds, bathroom, and occupancy prices", () =
       { guests: 2, price: 45000 },
       { guests: 4, price: 60000 },
     ],
+    pricingMode: "unit",
   });
   assert.equal(result.ok, true);
   assert.equal(result.value.numberOfBeds, 3);
   assert.equal(result.value.occupancyPrices[1].price, 60000);
+  assert.equal(result.value.pricingMode, "unit");
 });
 
 test("accommodation booking enforces max stay nights", () => {
@@ -181,7 +183,7 @@ test("accommodation booking enforces max stay nights", () => {
   assert.equal(result.ok, false);
 });
 
-test("stay quote uses nights and occupancy instead of guests times rooms", () => {
+test("stay quote uses the option price times nights for the whole unit", () => {
   const { calculateStayQuote } = require("../src/domains");
   const quote = calculateStayQuote({
     option: { price: 60000, attributes: { occupancyPrices: [{ guests: 1, price: 40000 }, { guests: 2, price: 60000 }] } },
@@ -190,8 +192,25 @@ test("stay quote uses nights and occupancy instead of guests times rooms", () =>
     nights: 7,
     ratePlan: "weekly",
   });
+  assert.equal(quote.pricingMode, "unit");
+  assert.equal(quote.nightly, 60000);
   assert.equal(quote.subtotal, 420000);
   assert.equal(quote.total, 357000);
+});
+
+test("stay quote multiplies the option price by guests when priced per guest", () => {
+  const { calculateStayQuote } = require("../src/domains");
+  const quote = calculateStayQuote({
+    option: { price: 40000, attributes: { pricingMode: "per_guest" } },
+    listing: {},
+    guests: 2,
+    nights: 3,
+    ratePlan: "standard",
+  });
+  assert.equal(quote.pricingMode, "per_guest");
+  assert.equal(quote.nightly, 80000);
+  assert.equal(quote.subtotal, 240000);
+  assert.equal(quote.total, 240000);
 });
 
 test("public listing attributes hide identity document numbers", () => {

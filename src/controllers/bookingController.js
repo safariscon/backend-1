@@ -824,16 +824,22 @@ const createBookingRequest = async (req, res) => {
               ratePlan: domainBooking.payload?.ratePlan || "standard",
             })
           : null;
+      const stayPriceLabel = `RWF ${Number(stayQuote?.unitPrice || stayQuote?.nightly || 0).toLocaleString("en-US")}`;
+      const stayReason = stayQuote?.pricingMode === "per_guest"
+        ? `${stayQuote.guests} guest${stayQuote.guests === 1 ? "" : "s"} × ${stayPriceLabel} × ${stayQuote.nights} night${stayQuote.nights === 1 ? "" : "s"}.`
+        : `${stayQuote.nights} night${stayQuote.nights === 1 ? "" : "s"} × ${stayPriceLabel} for the unit.`;
       const baseQuote = stayQuote
         ? {
             total: stayQuote.total,
             deposit: Math.round((stayQuote.total * Number(depositPercent || 50)) / 100),
             remaining: 0,
             depositPercent,
-            reason: `${stayQuote.nights} night${stayQuote.nights === 1 ? "" : "s"} × RWF ${stayQuote.nightly.toLocaleString("en-US")}.`,
+            reason: stayReason,
             totalConsumptionUnits,
             nights: stayQuote.nights,
             nightly: stayQuote.nightly,
+            guests: stayQuote.guests,
+            pricingMode: stayQuote.pricingMode,
           }
         : calculateQuote({
             option: selectedOption,

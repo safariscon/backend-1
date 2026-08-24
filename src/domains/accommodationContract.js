@@ -22,6 +22,7 @@ const FIRST_CHECK_IN_MODES = ["asap", "date"];
 const HORIZON_DAYS = [365, 548];
 const ID_TYPES = ["national_id", "passport", "company_registration"];
 const RATE_PLANS = ["standard", "non_refundable", "weekly"];
+const PRICING_MODES = ["unit", "per_guest"];
 
 const PROPERTY_KINDS = [
   { id: "apartment", label: "Apartment", family: "apartment", categorySlug: "apartment" },
@@ -138,6 +139,11 @@ const parseBeds = (rawBeds, fallback = {}) => {
   return [];
 };
 
+const parsePricingMode = (raw) => {
+  const mode = cleanText(raw, 20);
+  return PRICING_MODES.includes(mode) ? mode : "unit";
+};
+
 const parseOccupancyPrices = (raw, maxGuests, fallbackPrice) => {
   const source = Array.isArray(raw) ? raw : [];
   const prices = source
@@ -201,14 +207,11 @@ const sanitizeListingAttributesForPublic = (attributes = {}) => {
   };
 };
 
-const occupancyNightlyRate = ({ option = {}, guests }) => {
+const stayNightlyRate = ({ option = {}, guests }) => {
   const attrs = asObject(option.attributes || option);
-  const prices = Array.isArray(attrs.occupancyPrices) ? attrs.occupancyPrices : [];
-  const match = prices.find((row) => Number(row.guests) === Number(guests));
-  const closest = [...prices]
-    .filter((row) => Number(row.guests) >= Number(guests))
-    .sort((a, b) => Number(a.guests) - Number(b.guests))[0];
-  const nightly = Number(match?.price ?? closest?.price ?? option.price ?? 0);
+  const base = Number(option.price || 0);
+  const count = Math.max(1, Number(guests) || 1);
+  const nightly = parsePricingMode(attrs.pricingMode) === "per_guest" ? base * count : base;
   return Number.isFinite(nightly) && nightly >= 0 ? nightly : 0;
 };
 
@@ -225,8 +228,12 @@ const applyRatePlanDiscount = ({ amount, nights, ratePlan, listingAttributes = {
 
 const calculateStayQuote = ({ option = {}, listing = {}, guests = 1, nights = 1, ratePlan = "standard" } = {}) => {
   const listingDetails = asObject(listing.listingAttributes || listing);
+  const attrs = asObject(option.attributes || option);
   const stayNights = Math.max(1, Number(nights) || 1);
-  const nightly = occupancyNightlyRate({ option, guests });
+  const guestCount = Math.max(1, Number(guests) || 1);
+  const pricingMode = parsePricingMode(attrs.pricingMode);
+  const unitPrice = Number(option.price || 0);
+  const nightly = stayNightlyRate({ option, guests: guestCount });
   const subtotal = nightly * stayNights;
   const total = applyRatePlanDiscount({
     amount: subtotal,
@@ -235,9 +242,11 @@ const calculateStayQuote = ({ option = {}, listing = {}, guests = 1, nights = 1,
     listingAttributes: listingDetails,
   });
   return {
+    pricingMode,
+    unitPrice: Number.isFinite(unitPrice) && unitPrice >= 0 ? unitPrice : 0,
     nightly,
     nights: stayNights,
-    guests: Math.max(1, Number(guests) || 1),
+    guests: guestCount,
     ratePlan: RATE_PLANS.includes(ratePlan) ? ratePlan : "standard",
     subtotal: Math.round(subtotal),
     total: Math.max(0, total),
@@ -359,6 +368,7 @@ const validateInventory = (input = {}) => {
   }
 
   const occupancyPrices = parseOccupancyPrices(raw.occupancyPrices, maxGuests, raw.price);
+  const pricingMode = parsePricingMode(raw.pricingMode);
   const unitType = UNIT_TYPES.includes(cleanText(raw.unitType, 20)) ? cleanText(raw.unitType, 20) : "double";
   const unitName = cleanText(raw.unitName || raw.name, 80);
 
@@ -378,6 +388,7 @@ const validateInventory = (input = {}) => {
     bathroomAmenities: idsFrom(BATHROOM_AMENITIES, raw.bathroomAmenities),
     roomAmenities: idsFrom(ROOM_AMENITIES, raw.roomAmenities),
     occupancyPrices,
+    pricingMode,
     breakfastIncluded: asBoolean(raw.breakfastIncluded),
     amenities: asStringList(raw.amenities),
   });
@@ -462,6 +473,7 @@ module.exports = {
   UNIT_TYPES,
   STANDARD_UNIT_NAMES,
   RATE_PLANS,
+  PRICING_MODES,
   kindMeta,
   sanitizeListingAttributesForPublic,
   calculateStayQuote,
