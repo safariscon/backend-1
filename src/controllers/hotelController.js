@@ -1389,6 +1389,20 @@ const upsertMyServiceOption = async (req, res) => {
     }
 
     await syncServiceOptionsToAvailabilityTable(business._id);
+    const optionCapacity = Math.max(1, Number(option.capacity || option.attributes?.quantity || stayCapacity || 1));
+    const existingAvailability = await findAvailability({ serviceId: business._id, optionId: option._id });
+    if (!existingAvailability) {
+      await upsertAvailability({
+        serviceId: business._id,
+        optionId: option._id,
+        payload: {
+          capacityTotal: optionCapacity,
+          capacityRemaining: optionCapacity,
+          trackCapacity: true,
+        },
+        trackCapacity: true,
+      });
+    }
     if (business.approvalStatus === "approved") {
       business.approvalStatus = "pending";
       await business.save();

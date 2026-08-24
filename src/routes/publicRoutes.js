@@ -9,14 +9,20 @@ const {
   getAnnouncement,
   getMarketplaceSettings,
   getPublicServiceAvailability,
+  getPublicHotel,
 } = require("../controllers/publicController");
+const { listReviews, upsertReview } = require("../controllers/reviewController");
 const { listPublicCategories, getPublicCategory } = require("../controllers/serviceCategoryController");
+const { protect } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
 router.get("/hotels", listPublicHotels);
 router.get("/hotels/:hotelId/services", listHotelServices);
 router.get("/hotels/:hotelId/availability", getPublicServiceAvailability);
+router.get("/hotels/:hotelId/reviews", listReviews);
+router.post("/hotels/:hotelId/reviews", protect, upsertReview);
+router.get("/hotels/:hotelId", getPublicHotel);
 router.get("/marketplace/suppliers", listMarketplaceSuppliers);
 router.get("/announcement", getAnnouncement);
 router.get("/marketplace-settings", getMarketplaceSettings);

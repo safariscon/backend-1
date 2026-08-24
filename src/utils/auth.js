@@ -57,6 +57,7 @@ const buildUserPayload = (user) => ({
   emailVerified: Boolean(user.emailVerified),
   termsAccepted: Boolean(user.termsAccepted),
   termsAcceptedAt: user.termsAcceptedAt || null,
+  avatarUrl: user.avatarUrl || "",
 });
 
 module.exports = {

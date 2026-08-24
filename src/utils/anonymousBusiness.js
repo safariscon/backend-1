@@ -72,13 +72,18 @@ const anonymizeBusiness = (business, guestName) => {
     categorySlug,
     location: business.locationDetails?.district || getDestinationRegion(business.location),
     destinationLocation: business.locationDetails?.district || getDestinationRegion(business.location),
-    description: `Book this verified ${getGuestCategoryLabel(business.type || categorySlug).toLowerCase()} securely. Provider identity and exact details unlock after full payment.`,
+    description: String(business.description || "").trim()
+      || `Book this verified ${getGuestCategoryLabel(business.type || categorySlug).toLowerCase()} securely. Provider identity unlocks after full payment.`,
     basePrice: 0,
     priceText: "",
     images,
     primaryImage,
     promotion: business.promotion || { enabled: false },
     listingAttributes: sanitizeListingAttributesForPublic(business.listingAttributes || {}),
+    paymentPolicy: business.paymentPolicy || null,
+    cancellationPolicy: business.cancellationPolicy || business.bookingRules?.cancellationPolicy || null,
+    domain: business.domain || "",
+    subtype: business.subtype || categorySlug,
     supportsOptions: business.supportsOptions !== false,
     catalogLocation: business.catalogLocation
       ? {
@@ -91,8 +96,11 @@ const anonymizeBusiness = (business, guestName) => {
           area: business.catalogLocation.area,
         }
       : null,
-    amenities: [],
+    amenities: Array.isArray(business.listingAttributes?.amenities) ? business.listingAttributes.amenities : [],
     services: [],
+    options: Array.isArray(business.options) ? business.options : [],
+    ratingAverage: Number(business.ratingAverage || 0),
+    reviewCount: Number(business.reviewCount || 0),
     approvalStatus: business.approvalStatus,
     status: business.status,
     availableQuantity: business.availableQuantity,

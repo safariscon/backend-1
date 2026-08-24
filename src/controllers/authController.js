@@ -1261,6 +1261,49 @@ const acceptTerms = async (req, res) => {
   }
 };
 
+const updateProfile = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ message: "User not found." });
+
+    const name = String(req.body.name ?? user.name).trim();
+    const phone = String(req.body.phone ?? user.phone ?? "").trim();
+    if (!name) return res.status(400).json({ message: "Name is required." });
+
+    user.name = name.slice(0, 120);
+    user.phone = phone.slice(0, 40);
+    if (typeof req.body.avatarUrl === "string" && /^https?:\/\//i.test(req.body.avatarUrl.trim())) {
+      user.avatarUrl = req.body.avatarUrl.trim();
+    }
+    await user.save();
+    return res.json({
+      message: "Profile updated.",
+      user: buildUserPayload(user),
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to update profile.", error: error.message });
+  }
+};
+
+const uploadProfileAvatar = async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: "Profile image is required." });
+    const { uploadBufferToCloudinary } = require("./uploadController");
+    const result = await uploadBufferToCloudinary(req.file);
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ message: "User not found." });
+    user.avatarUrl = result.secure_url;
+    await user.save();
+    return res.json({
+      message: "Profile photo updated.",
+      url: result.secure_url,
+      user: buildUserPayload(user),
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to upload profile photo.", error: error.message });
+  }
+};
+
 module.exports = {
   login,
   resendLoginOtp,
@@ -1276,4 +1319,6 @@ module.exports = {
   forgotPassword,
   resetPassword,
   acceptTerms,
+  updateProfile,
+  uploadProfileAvatar,
 };

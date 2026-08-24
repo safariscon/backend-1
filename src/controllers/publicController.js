@@ -6,7 +6,9 @@ const Transaction = require("../models/Transaction");
 const SiteSetting = require("../models/SiteSetting");
 const { getCache, setCache } = require("../utils/cache");
 const { createPdfReceipt } = require("../utils/pdfReceipt");
-const { anonymizeBusinessList, createGuestName } = require("../utils/anonymousBusiness");
+const { anonymizeBusinessList, anonymizeBusiness, createGuestName } = require("../utils/anonymousBusiness");
+const { attachPublicInventory, mergeOptionsIntoAvailabilityTable } = require("../utils/publicInventory");
+const { reviewStatsForService } = require("../controllers/reviewController");
 const { buildPublicCatalogFilter, publicCatalogCacheKey } = require("../utils/serviceFilters");
 const QRCode = require("qrcode");
 const { storeBookingPdf, getBookingPdfDownloadUrl } = require("../services/bookingPdfStorage");
@@ -32,14 +34,24 @@ const listPublicHotels = async (req, res) => {
 
     const hotels = await Hotel.find(buildPublicCatalogFilter(req.query))
       .select(
-        "type categoryId categorySlug location locationDetails catalogLocation images primaryImage listingAttributes supportsOptions promotion bookingRules bookingMode availabilityTable bookingForm approvalStatus status availableQuantity quantityRemaining inventoryStatus commissionPercentage cancelPenaltyPercent cancelWindowHours createdAt updatedAt"
+        "type categoryId categorySlug domain subtype location locationDetails catalogLocation images primaryImage description listingAttributes paymentPolicy cancellationPolicy supportsOptions promotion bookingRules bookingMode availabilityTable bookingForm approvalStatus status availableQuantity quantityRemaining inventoryStatus commissionPercentage cancelPenaltyPercent cancelWindowHours createdAt updatedAt"
       )
       .sort({ type: 1, createdAt: 1, _id: 1 })
       .skip((page - 1) * limit)
       .limit(limit)
       .lean();
 
-    const anonymousHotels = anonymizeBusinessList(hotels).sort(
+    const inventoryByService = await attachPublicInventory(hotels);
+    const anonymousHotels = anonymizeBusinessList(
+      hotels.map((hotel) => {
+        const options = inventoryByService.get(String(hotel._id)) || [];
+        return {
+          ...hotel,
+          options,
+          availabilityTable: mergeOptionsIntoAvailabilityTable(hotel.availabilityTable, options),
+        };
+      })
+    ).sort(
       (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
     );
     const payload = {
@@ -290,9 +302,41 @@ const getMarketplaceSettings = async (_req, res) => {
   }
 };
 
+const getPublicHotel = async (req, res) => {
+  try {
+    const hotel = await Hotel.findOne({
+      _id: req.params.hotelId,
+      approvalStatus: "approved",
+    })
+      .select(
+        "type categoryId categorySlug domain subtype location locationDetails catalogLocation images primaryImage description listingAttributes paymentPolicy cancellationPolicy supportsOptions promotion bookingRules bookingMode availabilityTable bookingForm approvalStatus status availableQuantity quantityRemaining inventoryStatus commissionPercentage cancelPenaltyPercent cancelWindowHours createdAt updatedAt"
+      )
+      .lean();
+    if (!hotel) return res.status(404).json({ message: "Service not found." });
+
+    const inventoryByService = await attachPublicInventory([hotel]);
+    const options = inventoryByService.get(String(hotel._id)) || [];
+    const stats = await reviewStatsForService(hotel._id);
+    const { createGuestName, getGuestCategoryLabel } = require("../utils/anonymousBusiness");
+    const titled = anonymizeBusiness(
+      {
+        ...hotel,
+        options,
+        availabilityTable: mergeOptionsIntoAvailabilityTable(hotel.availabilityTable, options),
+        ...stats,
+      },
+      createGuestName(hotel.type || hotel.categorySlug, 1)
+    );
+    titled.categoryLabel = getGuestCategoryLabel(hotel.type || hotel.categorySlug);
+
+    return res.json({ hotel: titled, service: titled, business: titled });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to fetch service.", error: error.message });
+  }
+};
+
 const getPublicServiceAvailability = async (req, res) => {
   try {
-    const Hotel = require("../models/Hotel");
     const ServiceCategory = require("../models/ServiceCategory");
     const {
       findAvailability,
@@ -348,5 +392,6 @@ module.exports = {
   publicQr,
   getAnnouncement,
   getMarketplaceSettings,
+  getPublicHotel,
   getPublicServiceAvailability,
 };

@@ -11,12 +11,13 @@ const optionToAvailabilityRow = (option) => {
     cells: {
       service: option.name,
       price: option.price,
-      // Engine defaults only — sellers do not configure these unless admin adds optionFieldSchema attrs.
       priceType: option.priceType || "fixed",
       calculationField: option.calculationField || "quantity",
       durationUnit: option.durationUnit || "",
       maximumDuration: option.maximumDuration,
-      availability: Math.max(1, Number(option.capacity || 1)),
+      availability: Math.max(1, Number(option.attributes?.quantity || option.capacity || 1)),
+      quantity: Math.max(1, Number(option.attributes?.quantity || option.capacity || 1)),
+      remaining: Math.max(1, Number(option.attributes?.quantity || option.capacity || 1)),
       availableFrom: option.availableFrom || "",
       availableTo: option.availableTo || "",
       availableDays,
@@ -24,7 +25,10 @@ const optionToAvailabilityRow = (option) => {
       availableEndTime: option.availableEndTime || "",
       requiresTime: Boolean(option.requiresTime),
       details: option.details || "",
+      attributes: option.attributes && typeof option.attributes === "object" ? option.attributes : {},
     },
+    optionId: option._id,
+    attributes: option.attributes && typeof option.attributes === "object" ? option.attributes : {},
   };
 };
 
