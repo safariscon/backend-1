@@ -303,17 +303,14 @@ const validateConsumptionAgainstAvailability = (availability, consumption) => {
 
   const open = normalizeClockTime(availability.dayStartTime);
   const close = normalizeClockTime(availability.dayEndTime);
-  if (open || close) {
-    const startTime = normalizeClockTime(consumption.consumptionStartTime);
-    const endTime = normalizeClockTime(consumption.consumptionEndTime);
+  const startTime = normalizeClockTime(consumption.consumptionStartTime);
+  const endTime = normalizeClockTime(consumption.consumptionEndTime);
+  if ((open || close) && (startTime || endTime)) {
     if (open && startTime && startTime < open) {
       return { ok: false, message: `Consumption start time must be at or after ${open}.` };
     }
     if (close && endTime && endTime > close) {
       return { ok: false, message: `Consumption end time must be at or before ${close}.` };
-    }
-    if (open && close && !startTime && !endTime) {
-      // Date-only booking on a timed availability is allowed for full-day use within the window.
     }
   }
 

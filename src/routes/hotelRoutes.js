@@ -11,6 +11,9 @@ const {
   getMyServiceAvailability,
   upsertMyServiceAvailability,
   listMyServiceAvailabilities,
+  listMyOptionBlocks,
+  createMyOptionBlock,
+  deleteMyOptionBlock,
   updateBookingStatus,
   verifyBookingCodeForCompletion,
   completeVerifiedBooking,
@@ -51,6 +54,9 @@ router.get("/services/:serviceId/availability", protect, sellerOnly, getMyServic
 router.get("/services/:serviceId/availabilities", protect, sellerOnly, listMyServiceAvailabilities);
 router.put("/services/:serviceId/availability", protect, sellerOnly, upsertMyServiceAvailability);
 router.put("/services/:serviceId/options/:optionId/availability", protect, sellerOnly, upsertMyServiceAvailability);
+router.get("/services/:serviceId/options/:optionId/blocks", protect, sellerOnly, listMyOptionBlocks);
+router.post("/services/:serviceId/options/:optionId/blocks", protect, sellerOnly, createMyOptionBlock);
+router.delete("/services/:serviceId/options/:optionId/blocks/:blockId", protect, sellerOnly, deleteMyOptionBlock);
 router.post("/uploads/images", protect, sellerOnly, imageUpload.array("images", 5), uploadImages);
 router.post("/rooms", protect, sellerOnly, createRoom);
 router.put("/rooms/:roomId", protect, sellerOnly, updateRoom);

@@ -51,9 +51,12 @@ const {
   findAvailability,
   upsertAvailability,
   serializeAvailability,
+  normalizeIsoDate,
 } = require("../services/availabilityService");
 const ServiceAvailability = require("../models/ServiceAvailability");
+const AvailabilityBlock = require("../models/AvailabilityBlock");
 const User = require("../models/User");
+const { serializeBlock, remainingForStay, loadStayOccupancy, optionQuantity, isStayLike } = require("../services/occupancyService");
 
 const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
 const DEPOSIT_PERCENT = 30;
@@ -1527,6 +1530,13 @@ const getMyServiceAvailability = async (req, res) => {
         category?.availabilityPolicy || business.schemaSnapshot?.availabilityPolicy
       ),
       supportsOptions: business.supportsOptions !== false,
+      blocks: optionId && /^[a-f\d]{24}$/i.test(String(optionId))
+        ? (await AvailabilityBlock.find({
+            serviceId: business._id,
+            optionId,
+            isActive: { $ne: false },
+          }).sort({ startDate: 1 }).lean()).map(serializeBlock)
+        : [],
     });
   } catch (error) {
     return res.status(500).json({ message: "Failed to load availability.", error: error.message });
@@ -1542,8 +1552,9 @@ const upsertMyServiceAvailability = async (req, res) => {
     const optionIdRaw = req.body.optionId || req.params.optionId || null;
     const optionId = optionIdRaw && /^[a-f\d]{24}$/i.test(String(optionIdRaw)) ? String(optionIdRaw) : null;
 
+    let option = null;
     if (optionId) {
-      const option = await ServiceOption.findOne({ _id: optionId, serviceId: business._id }).lean();
+      option = await ServiceOption.findOne({ _id: optionId, serviceId: business._id }).lean();
       if (!option) return res.status(404).json({ message: "Option not found." });
     } else if (business.supportsOptions !== false && !req.body.forceServiceScope) {
       return res.status(400).json({
@@ -1568,19 +1579,30 @@ const upsertMyServiceAvailability = async (req, res) => {
     });
 
     // Keep legacy ServiceOption schedule fields in sync for option-scoped availability.
-    if (optionId) {
+    if (optionId && option) {
+      const stayLike = isStayLike({ listing: business, option, domain: business.domain });
       await ServiceOption.updateOne(
         { _id: optionId, serviceId: business._id },
         {
-          $set: {
-            availableFrom: doc.windowStartDate || "",
-            availableTo: doc.windowEndDate || "",
-            availableDays: doc.daysOfWeek || [],
-            availableStartTime: doc.dayStartTime || "",
-            availableEndTime: doc.dayEndTime || "",
-            capacity: Number(doc.capacityTotal || 1),
-            requiresTime: Boolean(doc.dayStartTime || doc.dayEndTime),
-          },
+          $set: stayLike
+            ? {
+                availableFrom: doc.windowStartDate || "",
+                availableTo: doc.windowEndDate || "",
+                availableDays: [],
+                availableStartTime: "",
+                availableEndTime: "",
+                capacity: Number(doc.capacityTotal || option.capacity || 1),
+                requiresTime: false,
+              }
+            : {
+                availableFrom: doc.windowStartDate || "",
+                availableTo: doc.windowEndDate || "",
+                availableDays: doc.daysOfWeek || [],
+                availableStartTime: doc.dayStartTime || "",
+                availableEndTime: doc.dayEndTime || "",
+                capacity: Number(doc.capacityTotal || 1),
+                requiresTime: Boolean(doc.dayStartTime || doc.dayEndTime),
+              },
         }
       );
       await syncServiceOptionsToAvailabilityTable(business._id);
@@ -1613,6 +1635,89 @@ const listMyServiceAvailabilities = async (req, res) => {
   }
 };
 
+const listMyOptionBlocks = async (req, res) => {
+  try {
+    if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
+    const business = await Hotel.findOne({ _id: req.params.serviceId, ...sellerBusinessFilter(req) }).lean();
+    if (!business) return res.status(404).json({ message: "Service not found." });
+    const option = await ServiceOption.findOne({ _id: req.params.optionId, serviceId: business._id }).lean();
+    if (!option) return res.status(404).json({ message: "Option not found." });
+    const occupancy = await loadStayOccupancy({ serviceId: business._id, optionId: option._id });
+    const checkIn = String(req.query.checkIn || "").trim();
+    const checkOut = String(req.query.checkOut || "").trim();
+    const quantity = optionQuantity(option);
+    return res.json({
+      quantity,
+      remaining: checkIn && checkOut
+        ? remainingForStay({
+            quantity,
+            consumptions: occupancy.consumptions,
+            blocks: occupancy.blocks,
+            checkIn,
+            checkOut,
+          })
+        : quantity,
+      blocks: occupancy.blocks.map(serializeBlock),
+      bookings: occupancy.consumptions.map((row) => ({
+        startDate: row.consumptionStartDate,
+        endDate: row.consumptionEndDate,
+        units: row.units,
+        status: row.status,
+      })),
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to load calendar blocks.", error: error.message });
+  }
+};
+
+const createMyOptionBlock = async (req, res) => {
+  try {
+    if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
+    const business = await Hotel.findOne({ _id: req.params.serviceId, ...sellerBusinessFilter(req) });
+    if (!business) return res.status(404).json({ message: "Service not found." });
+    const option = await ServiceOption.findOne({ _id: req.params.optionId, serviceId: business._id }).lean();
+    if (!option) return res.status(404).json({ message: "Option not found." });
+    const startDate = normalizeIsoDate(req.body.startDate);
+    const endDate = normalizeIsoDate(req.body.endDate);
+    if (!startDate || !endDate || endDate <= startDate) {
+      return res.status(400).json({ message: "Closed-until date must be after the closed-from date." });
+    }
+    const quantity = optionQuantity(option);
+    const units = Math.min(quantity, Math.max(1, Math.floor(Number(req.body.units || quantity) || 1)));
+    const doc = await AvailabilityBlock.create({
+      serviceId: business._id,
+      optionId: option._id,
+      startDate,
+      endDate,
+      units,
+      note: String(req.body.note || "").trim().slice(0, 240),
+      source: "provider",
+    });
+    clearCache("public:");
+    return res.status(201).json({ message: "Those dates are now closed for booking.", block: serializeBlock(doc) });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to close dates.", error: error.message });
+  }
+};
+
+const deleteMyOptionBlock = async (req, res) => {
+  try {
+    if (ensureHotelUser(req, res) === null && !["hotel", "supplier"].includes(req.user?.role)) return;
+    const business = await Hotel.findOne({ _id: req.params.serviceId, ...sellerBusinessFilter(req) }).lean();
+    if (!business) return res.status(404).json({ message: "Service not found." });
+    const deleted = await AvailabilityBlock.findOneAndUpdate(
+      { _id: req.params.blockId, serviceId: business._id, optionId: req.params.optionId },
+      { $set: { isActive: false } },
+      { returnDocument: "after" }
+    );
+    if (!deleted) return res.status(404).json({ message: "Closed-date range not found." });
+    clearCache("public:");
+    return res.json({ message: "Those dates are open again.", block: serializeBlock(deleted) });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to reopen dates.", error: error.message });
+  }
+};
+
 module.exports = {
   getMyHotelOverview: getMyHotelOverviewExport,
   listMyBookings,
@@ -1625,6 +1730,9 @@ module.exports = {
   getMyServiceAvailability,
   upsertMyServiceAvailability,
   listMyServiceAvailabilities,
+  listMyOptionBlocks,
+  createMyOptionBlock,
+  deleteMyOptionBlock,
   updateBookingStatus,
   verifyBookingCodeForCompletion,
   completeVerifiedBooking,

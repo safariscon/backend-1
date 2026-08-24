@@ -7,7 +7,13 @@ const SiteSetting = require("../models/SiteSetting");
 const { getCache, setCache } = require("../utils/cache");
 const { createPdfReceipt } = require("../utils/pdfReceipt");
 const { anonymizeBusinessList, anonymizeBusiness, createGuestName } = require("../utils/anonymousBusiness");
-const { attachPublicInventory, mergeOptionsIntoAvailabilityTable } = require("../utils/publicInventory");
+const {
+  attachPublicInventory,
+  mergeOptionsIntoAvailabilityTable,
+  listingHasStayAvailability,
+  stayDatesFromQuery,
+} = require("../utils/publicInventory");
+const { remainingForStay, optionQuantity, isStayLike, loadStayOccupancy, windowAllowsStay } = require("../services/occupancyService");
 const { reviewStatsForService } = require("../controllers/reviewController");
 const { buildPublicCatalogFilter, publicCatalogCacheKey } = require("../utils/serviceFilters");
 const QRCode = require("qrcode");
@@ -28,22 +34,31 @@ const listPublicHotels = async (req, res) => {
   try {
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(60, Math.max(1, Number(req.query.limit) || 60));
+    const stayDates = stayDatesFromQuery(req.query);
     const cacheKey = publicCatalogCacheKey(req.query, page, limit);
-    const cached = getCache(cacheKey);
+    const cached = stayDates.checkIn ? null : getCache(cacheKey);
     if (cached) return res.json(cached);
 
-    const hotels = await Hotel.find(buildPublicCatalogFilter(req.query))
+    const catalogQuery = Hotel.find(buildPublicCatalogFilter(req.query))
       .select(
         "type categoryId categorySlug domain subtype location locationDetails catalogLocation images primaryImage description listingAttributes paymentPolicy cancellationPolicy supportsOptions promotion bookingRules bookingMode availabilityTable bookingForm approvalStatus status availableQuantity quantityRemaining inventoryStatus commissionPercentage cancelPenaltyPercent cancelWindowHours createdAt updatedAt"
       )
-      .sort({ type: 1, createdAt: 1, _id: 1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean();
+      .sort({ type: 1, createdAt: 1, _id: 1 });
 
-    const inventoryByService = await attachPublicInventory(hotels);
+    const hotels = stayDates.checkIn
+      ? await catalogQuery.limit(200).lean()
+      : await catalogQuery.skip((page - 1) * limit).limit(limit).lean();
+
+    const inventoryByService = await attachPublicInventory(hotels, req.query);
+    const datedHotels = stayDates.checkIn
+      ? hotels
+          .filter((hotel) =>
+            listingHasStayAvailability(hotel, inventoryByService.get(String(hotel._id)) || [], req.query)
+          )
+          .slice((page - 1) * limit, page * limit)
+      : hotels;
     const anonymousHotels = anonymizeBusinessList(
-      hotels.map((hotel) => {
+      datedHotels.map((hotel) => {
         const options = inventoryByService.get(String(hotel._id)) || [];
         return {
           ...hotel,
@@ -64,9 +79,11 @@ const listPublicHotels = async (req, res) => {
         category: String(req.query.category || req.query.type || "").trim(),
         location: String(req.query.location || req.query.district || req.query.province || "").trim(),
         search: String(req.query.search || req.query.q || "").trim(),
+        checkIn: stayDates.checkIn,
+        checkOut: stayDates.checkOut,
       },
     };
-    setCache(cacheKey, payload);
+    if (!stayDates.checkIn) setCache(cacheKey, payload);
     return res.json(payload);
   } catch (error) {
     return res.status(500).json({
@@ -302,8 +319,13 @@ const getMarketplaceSettings = async (_req, res) => {
   }
 };
 
+const isMongoId = (value) => /^[a-f\d]{24}$/i.test(String(value || ""));
+
 const getPublicHotel = async (req, res) => {
   try {
+    if (!isMongoId(req.params.hotelId)) {
+      return res.status(404).json({ message: "Service not found." });
+    }
     const hotel = await Hotel.findOne({
       _id: req.params.hotelId,
       approvalStatus: "approved",
@@ -314,7 +336,7 @@ const getPublicHotel = async (req, res) => {
       .lean();
     if (!hotel) return res.status(404).json({ message: "Service not found." });
 
-    const inventoryByService = await attachPublicInventory([hotel]);
+    const inventoryByService = await attachPublicInventory([hotel], req.query);
     const options = inventoryByService.get(String(hotel._id)) || [];
     const stats = await reviewStatsForService(hotel._id);
     const { createGuestName, getGuestCategoryLabel } = require("../utils/anonymousBusiness");
@@ -347,12 +369,15 @@ const getPublicServiceAvailability = async (req, res) => {
 
     const hotelId = req.params.hotelId;
     const optionId = req.query.optionId || null;
+    if (!isMongoId(hotelId)) {
+      return res.status(404).json({ message: "Service not found." });
+    }
     const hotel = await Hotel.findOne({
       _id: hotelId,
       approvalStatus: "approved",
       status: "available",
     })
-      .select("categoryId supportsOptions schemaSnapshot")
+      .select("categoryId categorySlug type domain supportsOptions schemaSnapshot")
       .lean();
     if (!hotel) return res.status(404).json({ message: "Service not found." });
 
@@ -363,10 +388,41 @@ const getPublicServiceAvailability = async (req, res) => {
         .lean();
     }
 
+    const resolvedOptionId = optionId && /^[a-f\d]{24}$/i.test(String(optionId)) ? optionId : null;
     const availability = await findAvailability({
       serviceId: hotel._id,
-      optionId: optionId && /^[a-f\d]{24}$/i.test(String(optionId)) ? optionId : null,
+      optionId: resolvedOptionId,
     });
+
+    const stayDates = stayDatesFromQuery(req.query);
+    let remaining = null;
+    let quantity = null;
+    if (resolvedOptionId) {
+      const ServiceOption = require("../models/ServiceOption");
+      const option = await ServiceOption.findOne({ _id: resolvedOptionId, serviceId: hotel._id }).lean();
+      if (option) {
+        quantity = optionQuantity(option);
+        if (stayDates.checkIn && isStayLike({ listing: hotel, option })) {
+          const occupancy = await loadStayOccupancy({ serviceId: hotel._id, optionId: resolvedOptionId });
+          const window = windowAllowsStay(
+            availability,
+            stayDates.checkIn,
+            stayDates.checkOut
+          );
+          remaining = window.ok
+            ? remainingForStay({
+                quantity,
+                consumptions: occupancy.consumptions,
+                blocks: occupancy.blocks,
+                checkIn: stayDates.checkIn,
+                checkOut: stayDates.checkOut,
+              })
+            : 0;
+        } else {
+          remaining = quantity;
+        }
+      }
+    }
 
     return res.json({
       availability: serializeAvailability(availability),
@@ -377,6 +433,10 @@ const getPublicServiceAvailability = async (req, res) => {
         category?.consumptionPolicy || hotel.schemaSnapshot?.consumptionPolicy
       ),
       supportsOptions: hotel.supportsOptions !== false,
+      quantity,
+      remaining,
+      checkIn: stayDates.checkIn,
+      checkOut: stayDates.checkOut,
     });
   } catch (error) {
     return res.status(500).json({ message: "Failed to load availability.", error: error.message });

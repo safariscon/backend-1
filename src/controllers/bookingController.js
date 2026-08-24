@@ -35,6 +35,7 @@ const {
   createBookingConsumption,
   markConsumptionPaidAndCaptureCapacity,
 } = require("../services/availabilityService");
+const { evaluateStayAvailability, isStayLike } = require("../services/occupancyService");
 const {
   startCollection,
   refreshCollection,
@@ -615,6 +616,7 @@ const createBookingRequest = async (req, res) => {
           // (sellers no longer configure availability days on options).
           const days = normalizeAvailableDays(dbOption.availableDays);
           const unrestrictedDays = days.length === 0 || days.length === 7;
+          const stayOption = isStayLike({ listing: selectedBusiness, option: dbOption });
           selectedOption = {
             id: String(dbOption._id),
             name: dbOption.name,
@@ -626,11 +628,11 @@ const createBookingRequest = async (req, res) => {
             availability: Math.max(1, Number(dbOption.capacity || 1)),
             availableFrom: dbOption.availableFrom || "",
             availableTo: dbOption.availableTo || "",
-            availableDays: unrestrictedDays ? "" : days.join(","),
-            availableDaysList: unrestrictedDays ? [] : days,
-            availableStartTime: dbOption.availableStartTime || "",
-            availableEndTime: dbOption.availableEndTime || "",
-            requiresTime: Boolean(dbOption.requiresTime),
+            availableDays: stayOption ? "" : (unrestrictedDays ? "" : days.join(",")),
+            availableDaysList: stayOption ? [] : (unrestrictedDays ? [] : days),
+            availableStartTime: stayOption ? "" : (dbOption.availableStartTime || ""),
+            availableEndTime: stayOption ? "" : (dbOption.availableEndTime || ""),
+            requiresTime: stayOption ? false : Boolean(dbOption.requiresTime),
             details: dbOption.details || "",
             attributes: dbOption.attributes || {},
             capacity: dbOption.capacity,
@@ -743,6 +745,32 @@ const createBookingRequest = async (req, res) => {
       details.requestedService = selectedOption.name || details.requestedService;
       details.listedPriceRwf = Number(selectedOption.price || details.listedPriceRwf || 0);
     }
+    const stayLikeBooking = Boolean(
+      selectedBusiness
+      && isStayLike({
+        listing: selectedBusiness,
+        option: selectedOption,
+        domain: domainBooking?.domain,
+      })
+    );
+    if (stayLikeBooking) {
+      const stayAvailability = await findAvailability({
+        serviceId: selectedBusiness._id,
+        optionId: selectedOption?.id && /^[a-f\d]{24}$/i.test(String(selectedOption.id)) ? selectedOption.id : null,
+      });
+      const stayCheck = await evaluateStayAvailability({
+        listing: selectedBusiness,
+        option: selectedOption,
+        availability: stayAvailability,
+        checkIn: schedule.startDate,
+        checkOut: schedule.endDate,
+        units: totalConsumptionUnits,
+        domain: domainBooking?.domain,
+      });
+      if (!stayCheck.ok) {
+        return res.status(409).json({ message: stayCheck.message, code: "STAY_UNAVAILABLE" });
+      }
+    }
     const normalizedBookingDate = new Date(`${schedule.startDate}T12:00:00Z`);
     let normalizedEndBookingDate = new Date(`${schedule.endDate}T12:00:00Z`);
     let normalizedBookingDateFinal = normalizedBookingDate;
@@ -760,11 +788,15 @@ const createBookingRequest = async (req, res) => {
       const people = bookingPeople;
       const units = bookingQuantity;
       const capacityNeeded = totalConsumptionUnits;
-      const optionCapacity = Math.max(1, Number(selectedOption?.availability || 1));
-      if (capacityNeeded > optionCapacity) {
+      const stayLike = stayLikeBooking;
+      const optionCapacity = Math.max(1, Number(selectedOption?.availability || selectedOption?.capacity || 1));
+      if (!stayLike && capacityNeeded > optionCapacity) {
         return res.status(409).json({ message: "This service is not available for the selected date, time, or quantity. Please choose another option." });
       }
 
+      if (stayLike) {
+        // Occupancy for nights is checked above. Do not decrement a global leftover count.
+      } else {
       const hasAvailabilityRow = (selectedBusiness.availabilityTable?.rows || []).some(
         (row) => String(row.id) === String(selectedOption.id)
       );
@@ -811,6 +843,7 @@ const createBookingRequest = async (req, res) => {
         reservedBusiness = selectedBusiness._id;
         reservedOptionId = selectedOption.id || "default";
         reservedQuantity = capacityNeeded;
+      }
       }
 
       const depositPercent = selectedBusiness.paymentPolicy?.depositPercentage || DEPOSIT_PERCENT;
@@ -926,7 +959,7 @@ const createBookingRequest = async (req, res) => {
       : false;
 
     let serviceAvailability = null;
-    if (selectedBusiness && requiresAvailability) {
+    if (selectedBusiness && requiresAvailability && !stayLikeBooking) {
       serviceAvailability = await findAvailability({
         serviceId: selectedBusiness._id,
         optionId: selectedBusiness.supportsOptions === false ? null : optionObjectId,
@@ -949,7 +982,7 @@ const createBookingRequest = async (req, res) => {
           code: "CONSUMPTION_OUTSIDE_AVAILABILITY",
         });
       }
-    } else if (selectedBusiness) {
+    } else if (selectedBusiness && !stayLikeBooking) {
       serviceAvailability = await findAvailability({
         serviceId: selectedBusiness._id,
         optionId: selectedBusiness.supportsOptions === false ? null : optionObjectId,
@@ -969,6 +1002,12 @@ const createBookingRequest = async (req, res) => {
     }
 
     if (selectedBusiness) {
+      const stayLike = isStayLike({
+        listing: selectedBusiness,
+        option: selectedOption,
+        domain: domainBooking?.domain,
+      });
+      if (!stayLike) {
       const overlaps = await findOverlappingPaidConsumptions({
         serviceId: selectedBusiness._id,
         optionId: selectedBusiness.supportsOptions === false ? null : optionObjectId,
@@ -985,6 +1024,7 @@ const createBookingRequest = async (req, res) => {
             consumptionEndDate: item.consumptionEndDate,
           })),
         });
+      }
       }
     }
 

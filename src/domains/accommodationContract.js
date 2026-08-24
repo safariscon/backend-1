@@ -451,8 +451,8 @@ const validateBooking = ({ payload = {}, listing = {}, inventory = {} } = {}) =>
     schedule: {
       startDate: checkIn,
       endDate: checkOut,
-      startTime: listingDetails.checkInFrom || listingDetails.checkInTime || "",
-      endTime: listingDetails.checkOutUntil || listingDetails.checkOutTime || "",
+      startTime: "",
+      endTime: "",
       guests,
       numberOfPeople: guests,
       quantity: 1,

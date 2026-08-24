@@ -75,7 +75,9 @@ const publicCatalogCacheKey = (query = {}, page, limit) => {
   const category = String(query.category || query.type || "").trim().toLowerCase();
   const location = String(query.location || query.district || query.province || "").trim().toLowerCase();
   const search = String(query.search || query.q || "").trim().toLowerCase();
-  return `public:hotels:${page}:${limit}:${category}:${location}:${search}`;
+  const checkIn = String(query.checkIn || query.startDate || "").trim();
+  const checkOut = String(query.checkOut || query.endDate || "").trim();
+  return `public:hotels:${page}:${limit}:${category}:${location}:${search}:${checkIn}:${checkOut}`;
 };
 
 const buildAdminServiceFilter = (query = {}, ownerUserId) => {

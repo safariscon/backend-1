@@ -154,6 +154,9 @@ const optionIsSameDay = (option = {}) =>
   !optionRequiresEndDate(option) || ["same-day", "none"].includes(option.durationUnit);
 
 const optionRequiresTime = (option = {}) => {
+  const stay = ["nights"].includes(String(option.durationUnit || "").toLowerCase())
+    || ["per-night"].includes(String(option.priceType || "").toLowerCase());
+  if (stay) return false;
   const override = normalizeRequiresTime(option.requiresTime);
   if (override === "yes") return true;
   if (override === "no") return false;
