@@ -1,11 +1,14 @@
 const { withPrimaryImage } = require("./serviceImages");
+const { sanitizeListingAttributesForPublic } = require("../domains");
 
 const CATEGORY_LABELS = [
   { match: ["car-rental", "car-rentals"], label: "Car Rental" },
   { match: ["restaurant"], label: "Restaurant" },
   { match: ["tour", "activity-operator"], label: "Tour Guide" },
   { match: ["apartment", "vacation-rental"], label: "Apartment" },
-  { match: ["homestay", "guesthouse", "house"], label: "House" },
+  { match: ["homestay", "guesthouse", "guest-house", "house"], label: "House" },
+  { match: ["bed-and-breakfast", "bnb"], label: "Bed and breakfast" },
+  { match: ["hostel"], label: "Hostel" },
   { match: ["conference", "event-hall", "wedding-venue", "entertainment-venue"], label: "Event Organizer" },
   { match: ["hotel", "resort", "boutique", "extended-stay", "heritage", "airport"], label: "Hotel" },
   { match: ["motorbike", "scooter"], label: "Motorbike Rental" },
@@ -75,7 +78,7 @@ const anonymizeBusiness = (business, guestName) => {
     images,
     primaryImage,
     promotion: business.promotion || { enabled: false },
-    listingAttributes: business.listingAttributes || {},
+    listingAttributes: sanitizeListingAttributesForPublic(business.listingAttributes || {}),
     supportsOptions: business.supportsOptions !== false,
     catalogLocation: business.catalogLocation
       ? {

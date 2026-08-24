@@ -22,6 +22,18 @@ const serviceCategorySchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
+    domain: {
+      type: String,
+      enum: ["accommodation", "transport", "experiences", "dining", "venues"],
+      default: "experiences",
+      index: true,
+    },
+    subtype: {
+      type: String,
+      default: "",
+      trim: true,
+      lowercase: true,
+    },
     description: {
       type: String,
       default: "",

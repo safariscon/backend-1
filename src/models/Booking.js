@@ -355,6 +355,28 @@ const bookingSchema = new mongoose.Schema(
       default: "",
       trim: true,
     },
+    domain: {
+      type: String,
+      enum: ["accommodation", "transport", "experiences", "dining", "venues", ""],
+      default: "",
+      index: true,
+    },
+    categorySlug: {
+      type: String,
+      default: "",
+      trim: true,
+      lowercase: true,
+      index: true,
+    },
+    bookingPayload: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
+    remainingPaymentMethod: {
+      type: String,
+      enum: ["PAY_AT_ARRIVAL", "PAY_AT_CHECKOUT", "PAY_AT_BOOKING", ""],
+      default: "",
+    },
     /** Reference to BookingConsumption (explicit start/end consumption schedule) */
     consumptionId: {
       type: mongoose.Schema.Types.ObjectId,

@@ -16,7 +16,13 @@ const { buildSellerBookingsUrl, buildCustomerBookingsUrl } = require("../utils/f
 const { normalizeCustomerPaymentDetails } = require("../utils/payoutDetails");
 const { resolveCommissionPercentage } = require("../utils/commission");
 const { getXentripayConfig, toClientPaymentError } = require("../services/xentripayService");
-const { validateAttributesAgainstSchema, resolveBookingFieldSchema } = require("../utils/fieldSchema");
+const {
+  validateBookingDetails,
+  splitBookingAmounts,
+  policyFromListing,
+  calculateStayQuote,
+} = require("../domains");
+const CategoryBookingDetail = require("../models/CategoryBookingDetail");
 const ServiceCategory = require("../models/ServiceCategory");
 const ServiceOption = require("../models/ServiceOption");
 const {
@@ -70,7 +76,7 @@ const buildQrImageUrl = (token) =>
     buildVerifyUrl(token)
   )}`;
 
-const DEPOSIT_PERCENT = 100;
+const DEPOSIT_PERCENT = 50;
 const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
 
 const hasDepositPaid = (booking) => Boolean(booking?.detailsUnlocked) || DEPOSIT_PAID_STATUSES.includes(booking?.paymentStatus);
@@ -518,9 +524,9 @@ const createBookingRequest = async (req, res) => {
       });
     }
 
-    const bookingPeople = Math.max(1, Math.floor(Number(numberOfPeople || rawDetails.numberOfPeople || guests || 1)));
-    const bookingQuantity = Math.max(1, Math.floor(Number(quantity || rawDetails.quantity || 1)));
-    const totalConsumptionUnits = bookingPeople * bookingQuantity;
+    let bookingPeople = Math.max(1, Math.floor(Number(numberOfPeople || rawDetails.numberOfPeople || guests || 1)));
+    let bookingQuantity = Math.max(1, Math.floor(Number(quantity || rawDetails.quantity || 1)));
+    let totalConsumptionUnits = bookingPeople * bookingQuantity;
     details.numberOfPeople = bookingPeople;
     details.quantity = bookingQuantity;
     details.totalConsumptionUnits = totalConsumptionUnits;
@@ -542,44 +548,7 @@ const createBookingRequest = async (req, res) => {
       preferredHotelId = hotel._id;
       selectedBusiness = hotel;
 
-      // Admin-defined category booking fields are the source of truth for required/optional.
-      // Prefer the live category schema so stale service snapshots cannot require fields
-      // that are no longer configured for the selected category (e.g. Check-in date).
-      let liveCategory = null;
-      if (hotel.categoryId) {
-        liveCategory = await ServiceCategory.findById(hotel.categoryId)
-          .select("bookingFieldSchema")
-          .lean();
-      }
-      if (!liveCategory && (hotel.categorySlug || hotel.type)) {
-        liveCategory = await ServiceCategory.findOne({
-          $or: [
-            ...(hotel.categorySlug ? [{ slug: hotel.categorySlug }] : []),
-            ...(hotel.type ? [{ slug: hotel.type }] : []),
-          ],
-          isActive: { $ne: false },
-        })
-          .select("bookingFieldSchema")
-          .lean();
-      }
-      const bookingSchema = resolveBookingFieldSchema({
-        liveBookingFieldSchema: liveCategory?.bookingFieldSchema,
-        snapshotBookingFieldSchema: hotel.schemaSnapshot?.bookingFieldSchema,
-        hasLiveCategory: Boolean(liveCategory),
-      });
-      const bookingAttrs = validateAttributesAgainstSchema(
-        req.body.bookingAttributes || rawDetails.bookingAttributes || {},
-        bookingSchema,
-        { label: "bookingAttributes", appliesTo: "booking" }
-      );
-      if (!bookingAttrs.ok) {
-        return res.status(400).json({
-          message: bookingAttrs.message,
-          errors: bookingAttrs.errors,
-          code: "BOOKING_ATTRIBUTES_INVALID",
-        });
-      }
-      details.bookingAttributes = bookingAttrs.attributes;
+      details.bookingAttributes = req.body.bookingAttributes || rawDetails.bookingAttributes || {};
 
       const now = new Date();
       const promotion = getActivePromotion(hotel.promotion, now);
@@ -663,6 +632,8 @@ const createBookingRequest = async (req, res) => {
             availableEndTime: dbOption.availableEndTime || "",
             requiresTime: Boolean(dbOption.requiresTime),
             details: dbOption.details || "",
+            attributes: dbOption.attributes || {},
+            capacity: dbOption.capacity,
           };
         }
       }
@@ -697,12 +668,66 @@ const createBookingRequest = async (req, res) => {
       }
     }
 
+    let domainBooking = null;
+    if (selectedBusiness) {
+      const inventorySource = selectedOption
+        ? {
+            ...selectedOption,
+            attributes: selectedOption.attributes || {},
+            capacity: selectedOption.availability || selectedOption.capacity,
+          }
+        : {};
+      if (selectedOption?.id && /^[a-f0-9]{24}$/i.test(String(selectedOption.id)) && !selectedOption.attributes) {
+        const optionDoc = await ServiceOption.findById(selectedOption.id).select("attributes capacity").lean();
+        if (optionDoc) {
+          inventorySource.attributes = optionDoc.attributes || {};
+          inventorySource.capacity = optionDoc.capacity;
+        }
+      }
+      domainBooking = validateBookingDetails({
+        categoryOrSlug: selectedBusiness.categorySlug || selectedBusiness.type || selectedBusiness.schemaSnapshot,
+        payload: details.bookingAttributes || {},
+        listing: selectedBusiness,
+        inventory: inventorySource,
+      });
+      if (!domainBooking.ok) {
+        return res.status(400).json({
+          message: domainBooking.message,
+          errors: domainBooking.errors,
+          code: "BOOKING_DOMAIN_INVALID",
+        });
+      }
+      details.bookingAttributes = domainBooking.payload;
+      details.bookingPayload = domainBooking.payload;
+      if (domainBooking.schedule?.startDate) {
+        details.bookingDate = domainBooking.schedule.startDate;
+        details.startDate = domainBooking.schedule.startDate;
+      }
+      if (domainBooking.schedule?.endDate) {
+        details.endBookingDate = domainBooking.schedule.endDate;
+        details.endDate = domainBooking.schedule.endDate;
+      }
+      if (domainBooking.schedule?.startTime) details.startTime = domainBooking.schedule.startTime;
+      if (domainBooking.schedule?.endTime) details.endTime = domainBooking.schedule.endTime;
+      if (domainBooking.schedule?.numberOfPeople) {
+        details.numberOfPeople = domainBooking.schedule.numberOfPeople;
+        bookingPeople = domainBooking.schedule.numberOfPeople;
+      }
+      if (domainBooking.domain === "accommodation") {
+        bookingQuantity = Math.max(1, Math.floor(Number(quantity || rawDetails.quantity || domainBooking.schedule?.quantity || 1)));
+        totalConsumptionUnits = bookingQuantity;
+        details.quantity = bookingQuantity;
+        details.totalConsumptionUnits = totalConsumptionUnits;
+        details.numberOfPeople = bookingPeople;
+      }
+    }
+
     const schedule = validateBookingSchedule({
       option: selectedOption || {},
-      startDate: normalizedBookingDateValue,
-      endDate: normalizedEndBookingDateValue,
-      startTime: normalizedStartTime,
-      endTime: normalizedEndTime,
+      startDate: domainBooking?.schedule?.startDate || normalizedBookingDateValue,
+      endDate: domainBooking?.schedule?.endDate || normalizedEndBookingDateValue,
+      startTime: domainBooking?.schedule?.startTime || normalizedStartTime,
+      endTime: domainBooking?.schedule?.endTime || normalizedEndTime,
     });
     if (!schedule.ok) {
       return res.status(schedule.status).json({ message: schedule.message });
@@ -788,9 +813,40 @@ const createBookingRequest = async (req, res) => {
         reservedQuantity = capacityNeeded;
       }
 
+      const depositPercent = selectedBusiness.paymentPolicy?.depositPercentage || DEPOSIT_PERCENT;
+      const stayQuote =
+        domainBooking?.domain === "accommodation"
+          ? calculateStayQuote({
+              option: selectedOption,
+              listing: selectedBusiness,
+              guests: domainBooking.payload?.guests || people,
+              nights: domainBooking.payload?.nights || 1,
+              ratePlan: domainBooking.payload?.ratePlan || "standard",
+            })
+          : null;
+      const baseQuote = stayQuote
+        ? {
+            total: stayQuote.total,
+            deposit: Math.round((stayQuote.total * Number(depositPercent || 50)) / 100),
+            remaining: 0,
+            depositPercent,
+            reason: `${stayQuote.nights} night${stayQuote.nights === 1 ? "" : "s"} × RWF ${stayQuote.nightly.toLocaleString("en-US")}.`,
+            totalConsumptionUnits,
+            nights: stayQuote.nights,
+            nightly: stayQuote.nightly,
+          }
+        : calculateQuote({
+            option: selectedOption,
+            people,
+            quantity: units,
+            depositPercent,
+          });
+      if (stayQuote) {
+        baseQuote.remaining = Math.max(0, stayQuote.total - baseQuote.deposit);
+      }
       automaticQuote = {
         ...applyPromotionToQuote({
-          quote: calculateQuote({ option: selectedOption, people, quantity: units }),
+          quote: baseQuote,
           promotion: selectedBusiness.promotion,
         }),
         people,
@@ -941,28 +997,39 @@ const createBookingRequest = async (req, res) => {
     details.startTime = builtConsumption.consumption.consumptionStartTime;
     details.endTime = builtConsumption.consumption.consumptionEndTime;
 
+    const listingPolicies = selectedBusiness ? policyFromListing(selectedBusiness) : { payment: { depositPercentage: DEPOSIT_PERCENT } };
+    const money = splitBookingAmounts({
+      totalPrice: automaticQuote?.total || 0,
+      depositPercentage: listingPolicies.payment.depositPercentage,
+      commissionPercentage: selectedBusiness ? resolveCommissionPercentage(selectedBusiness) : 0,
+    });
+
     const booking = await Booking.create({
       touristId: req.user._id,
       destinationPlace: resolvedDestinationPlace,
       destinationLocation: resolvedDestinationLocation,
       preferredHotelId,
       hotelId: effectiveMode === "automatic" ? preferredHotelId : null,
-      checkIn: checkIn || normalizedBookingDateFinal,
-      checkOut: checkOut || normalizedEndBookingDate,
+      checkIn: domainBooking?.payload?.checkIn || checkIn || normalizedBookingDateFinal,
+      checkOut: domainBooking?.payload?.checkOut || checkOut || normalizedEndBookingDate,
       bookingDate: normalizedBookingDateFinal,
       endBookingDate: normalizedEndBookingDate,
       startTime: builtConsumption.consumption.consumptionStartTime || schedule.startTime,
       endTime: builtConsumption.consumption.consumptionEndTime || schedule.endTime,
-      guests: Number(guests) || bookingQuantity,
-      numberOfPeople: bookingPeople,
+      guests: domainBooking?.schedule?.guests || Number(guests) || bookingQuantity,
+      numberOfPeople: domainBooking?.schedule?.numberOfPeople || bookingPeople,
       quantity: bookingQuantity,
       totalConsumptionUnits,
-      totalPrice: automaticQuote?.total || 0,
-      depositPercentage: DEPOSIT_PERCENT,
-      depositPercent: DEPOSIT_PERCENT,
-      depositAmount: rebookOriginalBooking ? Number(automaticQuote?.total || getPaidDepositAmount(rebookOriginalBooking)) : automaticQuote?.total || 0,
-      remainingBalance: 0,
-      remainingAmount: 0,
+      totalPrice: money.totalAmount,
+      depositPercentage: money.depositPercentage,
+      depositPercent: money.depositPercentage,
+      depositAmount: rebookOriginalBooking ? Number(automaticQuote?.total || getPaidDepositAmount(rebookOriginalBooking)) : money.depositAmount,
+      remainingBalance: rebookOriginalBooking ? 0 : money.remainingAmount,
+      remainingAmount: rebookOriginalBooking ? 0 : money.remainingAmount,
+      remainingPaymentMethod: listingPolicies.payment.remainingPaymentMethod || "PAY_AT_ARRIVAL",
+      domain: domainBooking?.domain || selectedBusiness?.domain || "",
+      categorySlug: domainBooking?.categorySlug || selectedBusiness?.categorySlug || selectedBusiness?.type || "",
+      bookingPayload: domainBooking?.payload || {},
       bookingCode,
       anonymousBusinessName,
       verificationCode,
@@ -1025,12 +1092,27 @@ const createBookingRequest = async (req, res) => {
       originalBookingId: rebookClaim?.originalBookingId || null,
       rebookRequestId: rebookClaim?.requestId || null,
       adminResponseMessage: automaticQuote
-        ? "Your automatic quote is ready. Pay the full amount to confirm and unlock provider details."
+        ? `Your automatic quote is ready. Pay the ${money.depositPercentage}% deposit of RWF ${money.depositAmount.toLocaleString("en-US")} now. The remaining RWF ${money.remainingAmount.toLocaleString("en-US")} is due ${listingPolicies.payment.remainingPaymentMethod === "PAY_AT_CHECKOUT" ? "at checkout" : "on arrival"}.`
         : selectedBusiness
           ? "Your request has been submitted successfully. Please wait for service provider approval."
           : "Your request has been submitted successfully. Please wait for admin response.",
     });
     createdBooking = booking;
+
+    if (domainBooking?.ok && selectedBusiness) {
+      try {
+        await CategoryBookingDetail.create({
+          bookingId: booking._id,
+          domain: domainBooking.domain,
+          categorySlug: domainBooking.categorySlug,
+          serviceId: selectedBusiness._id,
+          inventoryId: selectedOption?.id || "",
+          payload: domainBooking.payload,
+        });
+      } catch (_detailError) {
+        /* Common booking already exists; domain payload is also stored on booking.bookingPayload. */
+      }
+    }
 
     if (selectedBusiness) {
       const consumptionDoc = await createBookingConsumption({
@@ -1215,15 +1297,15 @@ const finalizePaidBooking = async ({ booking, business, user, amount, method, pa
     },
     {
       $set: {
-        paymentStatus: "paid",
+        paymentStatus: Math.max(0, exactTotal - amount) > 0 ? "deposit_paid" : "paid",
         paymentMethod: method,
         paymentReference,
         amountPaid: amount,
-        depositPercent: 100,
-        depositPercentage: 100,
+        depositPercent: booking.depositPercent || booking.depositPercentage || DEPOSIT_PERCENT,
+        depositPercentage: booking.depositPercentage || booking.depositPercent || DEPOSIT_PERCENT,
         depositAmount: amount,
-        remainingBalance: 0,
-        remainingAmount: 0,
+        remainingBalance: Math.max(0, exactTotal - amount),
+        remainingAmount: Math.max(0, exactTotal - amount),
         detailsUnlocked: true,
         depositPaid: true,
         locationUnlocked: true,
@@ -1277,7 +1359,7 @@ const finalizePaidBooking = async ({ booking, business, user, amount, method, pa
   transaction.commissionStatus = "collected";
   transaction.payoutStatus = "held";
   transaction.payoutMessage =
-    "Full payment is held in the SafarisCon wallet until the cancellation window closes. Then the provider share is paid out automatically.";
+    "The deposit is held in the SafarisCon wallet until the cancellation window closes. Then the provider share is paid out automatically. Any remaining balance is collected later according to the listing payment policy.";
   if (typeof transaction.save === "function") await transaction.save();
 
   try {
@@ -1491,7 +1573,10 @@ const payBooking = async (req, res) => {
       return alreadyPaidResponse(res, booking);
     }
 
-    const amount = exactTotal;
+    const amount = Math.max(
+      1,
+      Number(booking.depositAmount || calculateDepositAmount(exactTotal, booking.depositPercent || booking.depositPercentage || DEPOSIT_PERCENT))
+    );
     const paymentDetailsResult = normalizeCustomerPaymentDetails(req.body, {
       ...req.user.toObject?.() || req.user,
       name: booking.touristId?.name || req.user.name,

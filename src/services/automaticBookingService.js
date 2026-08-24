@@ -425,14 +425,17 @@ const calculateDuration = ({ startDate, endDate, startTime, endTime, unit }) => 
   return Math.ceil(milliseconds / 86400000);
 };
 
-const calculateQuote = ({ option, people, quantity }) => {
+const calculateQuote = ({ option, people, quantity, depositPercent = 50 }) => {
   const base = option.price;
   const units = Math.max(1, Number(quantity));
   const guests = Math.max(1, Number(people));
   const totalConsumptionUnits = Math.max(1, Math.floor(guests * units));
   const total = Math.round(base * totalConsumptionUnits);
-  const reason = `You will pay the full amount of RWF ${total.toLocaleString("en-US")} now. Provider details unlock after successful payment. You may cancel until a few hours before the service starts; a cancellation fee then stays in the SafarisCon wallet.`;
-  return { total, deposit: total, remaining: 0, reason, totalConsumptionUnits };
+  const percent = Math.max(0, Math.min(100, Number(depositPercent) || 50));
+  const deposit = Math.round((total * percent) / 100);
+  const remaining = Math.max(0, total - deposit);
+  const reason = `Pay a ${percent}% deposit of RWF ${deposit.toLocaleString("en-US")} now. Remaining RWF ${remaining.toLocaleString("en-US")} is due later according to the provider payment policy. Provider details unlock after the deposit.`;
+  return { total, deposit, remaining, depositPercent: percent, reason, totalConsumptionUnits };
 };
 
 const getActivePromotion = (promotion, now = new Date()) => {
@@ -455,7 +458,13 @@ const getActivePromotion = (promotion, now = new Date()) => {
 const applyPromotionToQuote = ({ quote, promotion, now = new Date() }) => {
   const activePromotion = getActivePromotion(promotion, now);
   const originalPrice = Math.max(0, Number(quote.total || 0));
+  const depositPercent = Math.max(0, Math.min(100, Number(quote.depositPercent || 50)));
+  const applyDeposit = (amount) => {
+    const depositAmount = Math.round((amount * depositPercent) / 100);
+    return { depositAmount, remaining: Math.max(0, amount - depositAmount) };
+  };
   if (!activePromotion) {
+    const split = applyDeposit(originalPrice);
     return {
       ...quote,
       originalPrice,
@@ -464,19 +473,20 @@ const applyPromotionToQuote = ({ quote, promotion, now = new Date() }) => {
       promotionPercent: 0,
       discountAmount: 0,
       finalPrice: originalPrice,
-      depositPercent: 100,
-      depositAmount: originalPrice,
-      remaining: 0,
+      depositPercent,
+      depositAmount: split.depositAmount,
+      deposit: split.depositAmount,
+      remaining: split.remaining,
     };
   }
   const discountAmount = Math.round((originalPrice * activePromotion.percent) / 100);
   const finalPrice = Math.max(0, originalPrice - discountAmount);
-  const depositAmount = finalPrice;
+  const split = applyDeposit(finalPrice);
   return {
     ...quote,
     total: finalPrice,
-    deposit: depositAmount,
-    remaining: 0,
+    deposit: split.depositAmount,
+    remaining: split.remaining,
     originalPrice,
     promotionApplied: true,
     promotionTitle: activePromotion.title,
@@ -486,9 +496,9 @@ const applyPromotionToQuote = ({ quote, promotion, now = new Date() }) => {
     promotionEndAt: activePromotion.endAt,
     discountAmount,
     finalPrice,
-    depositPercent: 100,
-    depositAmount,
-    reason: `${activePromotion.title}: Save ${activePromotion.percent}% on this service. Valid from ${activePromotion.startAt.toLocaleDateString("en-US")} to ${activePromotion.endAt.toLocaleDateString("en-US")}. Pay the full discounted price of RWF ${finalPrice.toLocaleString("en-US")} now.`,
+    depositPercent,
+    depositAmount: split.depositAmount,
+    reason: `${activePromotion.title}: Save ${activePromotion.percent}% on this service. Pay a ${depositPercent}% deposit of RWF ${split.depositAmount.toLocaleString("en-US")} now.`,
   };
 };
 

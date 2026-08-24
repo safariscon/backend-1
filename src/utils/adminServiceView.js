@@ -1,4 +1,5 @@
 const { withPrimaryImage } = require("./serviceImages");
+const { serializeAvailability } = require("../services/availabilityService");
 
 const toPlain = (value) => {
   if (!value) return null;
@@ -97,7 +98,7 @@ const serializeImages = (business = {}) => {
   return images.map((url, index) => mapImage(url, index, business.name)).filter(Boolean);
 };
 
-const buildReview = (business = {}, provider) => {
+const buildReview = (business = {}, provider, inventory = {}) => {
   const map = serializeMapLocation(business);
   const images = serializeImages(business);
   const missing = [];
@@ -106,6 +107,7 @@ const buildReview = (business = {}, provider) => {
   if (!map.hasPin) missing.push("mapLocation");
   if (!map.province || !map.district || !map.sector) missing.push("rwandaAddress");
   if (!String(business.description || "").trim()) missing.push("description");
+  if (business.supportsOptions !== false && !(inventory.options || []).length) missing.push("options");
 
   return {
     approvalStatus: business.approvalStatus || "pending",
@@ -114,7 +116,98 @@ const buildReview = (business = {}, provider) => {
     hasProvider: Boolean(provider?.id || provider?.email),
     hasImages: images.length > 0,
     hasExactCoordinates: map.hasPin,
+    hasOptions: (inventory.options || []).length > 0,
+    optionCount: (inventory.options || []).length,
+    roomCount: (inventory.rooms || []).length,
     missing,
+  };
+};
+
+const serializeAdminOption = (option = {}, availability = null) => {
+  const data = toPlain(option) || {};
+  return {
+    _id: data._id,
+    id: data._id,
+    serviceId: data.serviceId,
+    name: data.name || "",
+    price: Number(data.price || 0),
+    currency: data.currency || "RWF",
+    priceType: data.priceType || "",
+    calculationField: data.calculationField || "",
+    durationUnit: data.durationUnit || "",
+    maximumDuration: data.maximumDuration ?? null,
+    capacity: Number(data.capacity || data.attributes?.quantity || 1),
+    availableFrom: data.availableFrom || "",
+    availableTo: data.availableTo || "",
+    availableDays: Array.isArray(data.availableDays) ? data.availableDays : [],
+    availableStartTime: data.availableStartTime || "",
+    availableEndTime: data.availableEndTime || "",
+    requiresTime: Boolean(data.requiresTime),
+    details: data.details || "",
+    attributes: data.attributes && typeof data.attributes === "object" ? data.attributes : {},
+    sortOrder: Number(data.sortOrder || 0),
+    isActive: data.isActive !== false,
+    availability: availability ? serializeAvailability(availability) : null,
+    createdAt: data.createdAt || null,
+    updatedAt: data.updatedAt || null,
+  };
+};
+
+const serializeAdminRoom = (room = {}) => {
+  const data = toPlain(room) || {};
+  return {
+    _id: data._id,
+    id: data._id,
+    roomNumber: data.roomNumber || "",
+    type: data.type || data.roomType || "",
+    roomType: data.roomType || data.type || "",
+    price: Number(data.price || data.pricePerNight || 0),
+    pricePerNight: Number(data.pricePerNight || data.price || 0),
+    capacity: data.capacity || {},
+    amenities: Array.isArray(data.amenities) ? data.amenities : [],
+    status: data.status || "",
+    availabilityCalendar: Array.isArray(data.availabilityCalendar) ? data.availabilityCalendar : [],
+  };
+};
+
+const serializeNestedService = (item = {}) => {
+  const data = toPlain(item) || {};
+  return {
+    _id: data._id,
+    id: data._id,
+    name: data.name || "",
+    category: data.category || "",
+    description: data.description || "",
+    price: Number(data.price || 0),
+    status: data.status || "",
+  };
+};
+
+const optionIdKey = (value) => (value ? String(value) : "");
+
+const attachInventory = ({
+  options = [],
+  availabilities = [],
+  rooms = [],
+  nestedServices = [],
+} = {}) => {
+  const availabilityByOption = new Map();
+  let serviceAvailability = null;
+  (availabilities || []).forEach((row) => {
+    const serialized = serializeAvailability(row);
+    if (row.optionId) availabilityByOption.set(optionIdKey(row.optionId), serialized);
+    else if (row.scope === "service" || !row.optionId) serviceAvailability = serialized;
+  });
+  const serializedOptions = (options || []).map((option) =>
+    serializeAdminOption(option, availabilityByOption.get(optionIdKey(option._id || option.id)))
+  );
+  return {
+    options: serializedOptions,
+    units: serializedOptions,
+    rooms: (rooms || []).map(serializeAdminRoom),
+    nestedServices: (nestedServices || []).map(serializeNestedService),
+    availabilities: (availabilities || []).map(serializeAvailability),
+    availability: serviceAvailability,
   };
 };
 
@@ -145,20 +238,26 @@ const serializeAdminServiceListItem = (business, provider) => {
   };
 };
 
-const serializeAdminServiceDetail = (business, { provider, serviceOptions = [] } = {}) => {
+const serializeAdminServiceDetail = (
+  business,
+  { provider, options = [], availabilities = [], rooms = [], nestedServices = [] } = {}
+) => {
   const data = withPrimaryImage(toPlain(business) || {});
   const owner = serializeProvider(provider || data.ownerUserId);
   const map = serializeMapLocation(data);
   const images = serializeImages(data);
-  const review = buildReview(data, owner);
+  const inventory = attachInventory({ options, availabilities, rooms, nestedServices });
+  const review = buildReview(data, owner, inventory);
 
   return {
     id: data._id,
     businessId: data._id,
     title: data.name,
     name: data.name,
-    category: data.type,
+    category: data.categorySlug || data.type || "",
     type: data.type,
+    domain: data.domain || data.schemaSnapshot?.domain || "",
+    subtype: data.subtype || data.schemaSnapshot?.subtype || data.categorySlug || data.type || "",
     description: data.description || "",
     approvalStatus: data.approvalStatus,
     verificationStatus: data.approvalStatus,
@@ -167,6 +266,7 @@ const serializeAdminServiceDetail = (business, { provider, serviceOptions = [] }
     inventoryStatus: data.inventoryStatus,
     availableQuantity: data.quantityRemaining ?? data.availableQuantity ?? 0,
     quantityRemaining: data.quantityRemaining ?? data.availableQuantity ?? 0,
+    basePrice: Number(data.basePrice || 0),
     commissionPercentage: data.commissionPercentage,
     cancelWindowHours: data.cancelWindowHours,
     cancelPenaltyPercent: data.cancelPenaltyPercent,
@@ -177,15 +277,14 @@ const serializeAdminServiceDetail = (business, { provider, serviceOptions = [] }
     primaryImage: data.primaryImage || "",
     categoryId: data.categoryId || null,
     categorySlug: data.categorySlug || data.type || "",
-    category: data.categorySlug || data.type || "",
     listingAttributes: data.listingAttributes || {},
+    paymentPolicy: data.paymentPolicy || null,
+    cancellationPolicy: data.cancellationPolicy || null,
     supportsOptions: data.supportsOptions !== false,
     schemaSnapshot: data.schemaSnapshot || null,
     catalogLocation: data.catalogLocation || null,
     agreementTerms: data.agreementTerms || null,
     platformCommissionPercent: data.commissionPercentage,
-    cancelPenaltyPercent: data.cancelPenaltyPercent,
-    cancelWindowHours: data.cancelWindowHours,
     location: data.location,
     locationDetails: data.locationDetails || {},
     serviceLocation: {
@@ -206,7 +305,11 @@ const serializeAdminServiceDetail = (business, { provider, serviceOptions = [] }
     providerName: owner?.name || "",
     providerEmail: owner?.email || "",
     sellerId: owner?.sellerId || "",
-    serviceOptions: serviceOptions.map((option) => withPrimaryImage(toPlain(option) || option)),
+    inventoryLabel:
+      data.inventoryLabel ||
+      (data.domain === "accommodation" || data.schemaSnapshot?.domain === "accommodation" ? "rooms" : "options"),
+    ...inventory,
+    serviceOptions: inventory.options,
     review,
     createdAt: data.createdAt,
     updatedAt: data.updatedAt,
@@ -231,5 +334,7 @@ module.exports = {
   serializeMapLocation,
   serializeAdminServiceListItem,
   serializeAdminServiceDetail,
+  serializeAdminOption,
+  attachInventory,
   resolveApprovalStatus,
 };

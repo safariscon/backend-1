@@ -29,11 +29,15 @@ const { normalizeServiceImages, withPrimaryImage } = require("../utils/serviceIm
 const ServiceCategory = require("../models/ServiceCategory");
 const ServiceOption = require("../models/ServiceOption");
 const { ensureSeededCategories } = require("../utils/ensureCategories");
+const { slugify } = require("../utils/fieldSchema");
 const {
-  slugify,
-  validateAttributesAgainstSchema,
-  snapshotCategorySchemas,
-} = require("../utils/fieldSchema");
+  enrichCategory,
+  snapshotDomain,
+  validateListingDetails,
+  validateInventoryDetails,
+  normalizePaymentPolicy,
+  normalizeCancellationPolicy,
+} = require("../domains");
 const { normalizeContactDetails } = require("../utils/phoneE164");
 const { normalizeCatalogLocation } = require("../utils/catalogLocation");
 const {
@@ -871,14 +875,20 @@ const upsertMyService = async (req, res) => {
       return res.status(400).json({ message: "Active service category not found." });
     }
 
-    const listingValidation = validateAttributesAgainstSchema(
-      req.body.listingAttributes || {},
-      category.listingFieldSchema || [],
-      { label: "listingAttributes", appliesTo: "listing" }
-    );
+    const listingValidation = validateListingDetails(category, req.body.listingAttributes || {});
     if (!listingValidation.ok) {
       return res.status(400).json({ message: listingValidation.message, errors: listingValidation.errors });
     }
+    const listingAttributes = listingValidation.value;
+    const domainCategory = enrichCategory(category);
+    const paymentPolicy = normalizePaymentPolicy(
+      req.body.paymentPolicy,
+      domainCategory.defaults?.payment || {}
+    );
+    const cancellationPolicy = normalizeCancellationPolicy(
+      req.body.cancellationPolicy,
+      domainCategory.defaults?.cancellation || {}
+    );
 
     const catalogInput = req.body.location || req.body.catalogLocation || req.body.serviceLocation || {};
     const catalogLocationResult = normalizeCatalogLocation(catalogInput);
@@ -1065,7 +1075,7 @@ const upsertMyService = async (req, res) => {
     );
     const rebookSettings = { requestDeadlineHours, rebookIdValidityHours };
     const suggestedCancelWindow = Number(category.defaults?.suggestedCancelWindowHours ?? 6);
-    const schemaSnapshot = snapshotCategorySchemas(category);
+    const schemaSnapshot = snapshotDomain(category);
     const description = String(req.body.description || "").trim();
 
     const sharedFields = {
@@ -1073,8 +1083,12 @@ const upsertMyService = async (req, res) => {
       type: category.slug,
       categoryId: category._id,
       categorySlug: category.slug,
+      domain: domainCategory.domain,
+      subtype: domainCategory.subtype,
       supportsOptions,
-      listingAttributes: listingValidation.attributes,
+      listingAttributes,
+      paymentPolicy,
+      cancellationPolicy,
       schemaSnapshot,
       catalogLocation,
       location: fullLocation,
@@ -1115,7 +1129,7 @@ const upsertMyService = async (req, res) => {
       const criticalChanged =
         existingBusiness.name !== title ||
         String(existingBusiness.categoryId || "") !== String(category._id) ||
-        JSON.stringify(existingBusiness.listingAttributes || {}) !== JSON.stringify(listingValidation.attributes) ||
+        JSON.stringify(existingBusiness.listingAttributes || {}) !== JSON.stringify(listingAttributes) ||
         Number(existingBusiness.catalogLocation?.latitude) !== Number(catalogLocation.latitude) ||
         Number(existingBusiness.catalogLocation?.longitude) !== Number(catalogLocation.longitude) ||
         JSON.stringify(existingBusiness.images || []) !== JSON.stringify(images) ||
@@ -1266,12 +1280,17 @@ const getMyService = async (req, res) => {
       buildServiceProviderPayload(business, req.user),
     ]);
     const categorySlug = liveCategory?.slug || business.categorySlug || business.type;
-    const optionSchema = liveCategory?.optionFieldSchema || business.schemaSnapshot?.optionFieldSchema || [];
+    const domainCategory = liveCategory ? enrichCategory(liveCategory) : enrichCategory({ slug: categorySlug });
+    const optionSchema = domainCategory.optionFieldSchema || [];
     const servicePayload = {
       ...withCommissionTerms(withPrimaryImage(business)),
       // Seller UI should render options from this array (name/price/attributes only).
       options: options.map(serializeSellerOption),
       optionFieldSchema: optionSchema,
+      domain: domainCategory.domain,
+      subtype: domainCategory.subtype,
+      inventoryLabel: domainCategory.inventoryLabel,
+      formMode: "domain",
       provider,
       providerName: provider.name,
       providerEmail: provider.email,
@@ -1323,31 +1342,36 @@ const upsertMyServiceOption = async (req, res) => {
       return res.status(400).json({ message: "name and a valid price are required." });
     }
 
-    // Prefer live category option fields so admin changes apply immediately.
-    let optionSchema = [];
-    if (business.categoryId) {
-      const liveCategory = await ServiceCategory.findById(business.categoryId)
-        .select("optionFieldSchema")
-        .lean();
-      optionSchema = liveCategory?.optionFieldSchema || [];
-    }
-    if (!optionSchema.length) {
-      optionSchema = business.schemaSnapshot?.optionFieldSchema || [];
-    }
-    const attrs = validateAttributesAgainstSchema(req.body.attributes || {}, optionSchema, {
-      label: "option attributes",
-      appliesTo: "option",
-    });
+    const attrs = validateInventoryDetails(
+      {
+        slug: business.categorySlug || business.type,
+        categorySlug: business.categorySlug,
+        type: business.type,
+      },
+      req.body.attributes || {}
+    );
     if (!attrs.ok) return res.status(400).json({ message: attrs.message, errors: attrs.errors });
 
     const engineDefaults = buildOptionEngineDefaults();
+    const stayCapacity = Math.max(1, Number(attrs.value.quantity || 1));
+    const isStay = ["hotel", "apartment", "homestay", "guest-house", "bed-and-breakfast", "hostel"].includes(
+      String(business.categorySlug || business.type || "")
+    ) || business.domain === "accommodation";
     const payload = {
       serviceId: business._id,
       name,
       price,
       currency: String(req.body.currency || "RWF").trim().toUpperCase() || "RWF",
       ...engineDefaults,
-      attributes: attrs.attributes,
+      ...(isStay
+        ? {
+            priceType: "per-night",
+            calculationField: "duration",
+            durationUnit: "nights",
+            capacity: stayCapacity,
+          }
+        : {}),
+      attributes: attrs.value,
       sortOrder: Number(req.body.sortOrder || 0),
       isActive: req.body.isActive !== false,
     };

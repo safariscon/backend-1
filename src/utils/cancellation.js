@@ -80,8 +80,26 @@ const splitCancelAmounts = ({ paidAmount, penaltyPercent, bookingCommissionPerce
   };
 };
 
-const policyFromBusiness = (business) =>
-  normalizeCancelPolicy(business?.cancellationPolicy || business?.bookingRules?.cancellationPolicy || business || {});
+const policyFromBusiness = (business) => {
+  const structured = business?.cancellationPolicy || {};
+  const legacy = business?.bookingRules?.cancellationPolicy || business || {};
+  const windowHours =
+    structured.freeCancellationUntilHours ??
+    structured.windowHours ??
+    business?.cancelWindowHours ??
+    legacy.windowHours ??
+    legacy.cancelWindowHours;
+  const penaltyPercent = structured.depositRefundable
+    ? structured.cancellationFeePercentage ?? 0
+    : structured.cancellationFeePercentage ??
+      business?.cancelPenaltyPercent ??
+      legacy.penaltyPercent ??
+      100;
+  return normalizeCancelPolicy(
+    { windowHours, penaltyPercent },
+    { windowHours: DEFAULT_CANCEL_WINDOW_HOURS, penaltyPercent: structured.depositRefundable ? 0 : 100 }
+  );
+};
 
 module.exports = {
   DEFAULT_CANCEL_WINDOW_HOURS,

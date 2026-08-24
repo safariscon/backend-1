@@ -21,6 +21,7 @@ const {
   serializeProvider,
   resolveApprovalStatus,
 } = require("../utils/adminServiceView");
+const { listAvailabilitiesForService } = require("../services/availabilityService");
 const mongoose = require("mongoose");
 const {
   REALTIME_EVENTS,
@@ -247,37 +248,30 @@ const listServices = async (req, res) => {
   }
 };
 
+const loadAdminServiceInventory = async (serviceId) => {
+  const [options, availabilities, rooms, nestedServices] = await Promise.all([
+    ServiceOption.find({ serviceId }).sort({ sortOrder: 1, createdAt: 1 }).lean(),
+    listAvailabilitiesForService(serviceId),
+    Room.find({ hotelId: serviceId }).sort({ createdAt: 1 }).lean(),
+    HotelService.find({ hotelId: serviceId }).sort({ createdAt: 1 }).lean(),
+  ]);
+  return { options, availabilities, rooms, nestedServices };
+};
+
 const getServiceDetail = async (req, res) => {
   try {
     const serviceId = req.params.serviceId || req.params.businessId;
     const business = await Hotel.findById(serviceId).lean();
     if (!business) return res.status(404).json({ message: "Service not found." });
 
-    const [provider, nestedServices, options] = await Promise.all([
+    const [provider, inventory] = await Promise.all([
       loadProviderForBusiness(business),
-      HotelService.find({ hotelId: business._id }).sort({ createdAt: 1 }).lean(),
-      ServiceOption.find({ serviceId: business._id }).sort({ sortOrder: 1, createdAt: 1 }).lean(),
+      loadAdminServiceInventory(business._id),
     ]);
 
-    const service = serializeAdminServiceDetail(business, {
-      provider,
-      serviceOptions: nestedServices,
-    });
-    service.options = options.map((option) => ({
-      _id: option._id,
-      id: option._id,
-      name: option.name,
-      price: option.price,
-      currency: option.currency || "RWF",
-      attributes: option.attributes || {},
-      sortOrder: option.sortOrder || 0,
-      isActive: option.isActive !== false,
-    }));
-    service.provider = provider;
-    service.providerName = provider?.name || service.providerName || "";
-    service.providerEmail = provider?.email || service.providerEmail || "";
-    service.providerPhone = provider?.phone || business.contactDetails?.phoneE164 || business.contactDetails?.phone || "";
-    service.sellerId = provider?.sellerId || service.sellerId || "";
+    const service = serializeAdminServiceDetail(business, { provider, ...inventory });
+    service.providerPhone =
+      provider?.phone || business.contactDetails?.phoneE164 || business.contactDetails?.phone || "";
     return res.json({
       service,
       business: service,
@@ -407,8 +401,11 @@ const updateBusinessVerification = async (req, res) => {
     });
     clearCache("public:");
 
-    const provider = await loadProviderForBusiness(business);
-    const service = serializeAdminServiceDetail(business, { provider });
+    const [provider, inventory] = await Promise.all([
+      loadProviderForBusiness(business),
+      loadAdminServiceInventory(business._id),
+    ]);
+    const service = serializeAdminServiceDetail(business, { provider, ...inventory });
     return res.json({
       message:
         approvalStatus === "approved"

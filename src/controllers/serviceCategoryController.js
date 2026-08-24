@@ -1,7 +1,8 @@
 const ServiceCategory = require("../models/ServiceCategory");
 const Hotel = require("../models/Hotel");
 const { ensureSeededCategories } = require("../utils/ensureCategories");
-const { normalizeFieldSchema, slugify } = require("../utils/fieldSchema");
+const { slugify } = require("../utils/fieldSchema");
+const { enrichCategory, snapshotDomain } = require("../domains");
 const { clearCache } = require("../utils/cache");
 const {
   normalizeAvailabilityPolicy,
@@ -10,41 +11,18 @@ const {
   defaultConsumptionPolicy,
 } = require("../services/availabilityService");
 
-const parseBoolean = (value, fallback = false) => {
-  if (value === undefined || value === null || value === "") return fallback;
-  if (typeof value === "boolean") return value;
-  if (typeof value === "number") return value === 1;
-  return ["true", "1", "yes", "on"].includes(String(value).trim().toLowerCase());
-};
-
-const applySupportsOptionsSideEffects = (category) => {
-  if (category.supportsOptions === false) {
-    category.optionFieldSchema = [];
-    if (category.availabilityPolicy) {
-      category.availabilityPolicy.optionRequiresAvailability = false;
-    }
-  }
-};
-
 const syncCategoryToServices = async (category) => {
+  const snapshot = snapshotDomain(category);
   await Hotel.updateMany(
     { categoryId: category._id },
     {
       $set: {
-        categorySlug: category.slug,
-        type: category.slug,
-        supportsOptions: Boolean(category.supportsOptions),
-        "schemaSnapshot.categoryId": category._id,
-        "schemaSnapshot.categorySlug": category.slug,
-        "schemaSnapshot.categoryName": category.name,
-        "schemaSnapshot.supportsOptions": Boolean(category.supportsOptions),
-        "schemaSnapshot.optionFieldSchema": category.supportsOptions
-          ? category.optionFieldSchema || []
-          : [],
-        "schemaSnapshot.listingFieldSchema": category.listingFieldSchema || [],
-        "schemaSnapshot.bookingFieldSchema": category.bookingFieldSchema || [],
-        "schemaSnapshot.availabilityPolicy": normalizeAvailabilityPolicy(category.availabilityPolicy),
-        "schemaSnapshot.consumptionPolicy": normalizeConsumptionPolicy(category.consumptionPolicy),
+        categorySlug: snapshot.categorySlug,
+        type: snapshot.categorySlug,
+        domain: snapshot.domain,
+        subtype: snapshot.subtype,
+        supportsOptions: Boolean(snapshot.supportsOptions),
+        schemaSnapshot: snapshot,
       },
     }
   );
@@ -54,11 +32,12 @@ const serializeCategory = (category, { includeInactive = false } = {}) => {
   if (!category) return null;
   const data = typeof category.toObject === "function" ? category.toObject() : { ...category };
   if (!includeInactive && data.isActive === false) return null;
+  const enriched = enrichCategory(data);
   return {
-    ...data,
+    ...enriched,
     id: data._id,
-    availabilityPolicy: normalizeAvailabilityPolicy(data.availabilityPolicy || defaultAvailabilityPolicy()),
-    consumptionPolicy: normalizeConsumptionPolicy(data.consumptionPolicy || defaultConsumptionPolicy()),
+    availabilityPolicy: normalizeAvailabilityPolicy(enriched.availabilityPolicy || defaultAvailabilityPolicy()),
+    consumptionPolicy: normalizeConsumptionPolicy(enriched.consumptionPolicy || defaultConsumptionPolicy()),
   };
 };
 
@@ -135,47 +114,11 @@ const getAdminCategory = async (req, res) => {
   }
 };
 
-const createAdminCategory = async (req, res) => {
-  try {
-    const name = String(req.body.name || "").trim();
-    const group = String(req.body.group || "Other").trim();
-    const slug = slugify(req.body.slug || name);
-    if (!name || !slug) {
-      return res.status(400).json({ message: "name is required." });
-    }
-
-    const exists = await ServiceCategory.findOne({ slug });
-    if (exists) return res.status(409).json({ message: "A category with this slug already exists." });
-
-    const category = await ServiceCategory.create({
-      slug,
-      name,
-      group,
-      description: String(req.body.description || "").trim(),
-      icon: req.body.icon || null,
-      isActive: req.body.isActive !== false,
-      sortOrder: Number(req.body.sortOrder || 0),
-      supportsOptions: parseBoolean(req.body.supportsOptions, true),
-      availabilityPolicy: normalizeAvailabilityPolicy(req.body.availabilityPolicy),
-      consumptionPolicy: normalizeConsumptionPolicy(req.body.consumptionPolicy),
-      listingFieldSchema: normalizeFieldSchema(req.body.listingFieldSchema, "listing"),
-      optionFieldSchema: parseBoolean(req.body.supportsOptions, true)
-        ? normalizeFieldSchema(req.body.optionFieldSchema, "option")
-        : [],
-      bookingFieldSchema: normalizeFieldSchema(req.body.bookingFieldSchema, "booking"),
-      defaults: {
-        suggestedCancelWindowHours: Math.max(
-          0,
-          Number(req.body.defaults?.suggestedCancelWindowHours ?? 6)
-        ),
-      },
-    });
-
-    clearCache("public:");
-    return res.status(201).json({ message: "Category created.", category: serializeCategory(category, { includeInactive: true }) });
-  } catch (error) {
-    return res.status(500).json({ message: "Failed to create category.", error: error.message });
-  }
+const createAdminCategory = async (_req, res) => {
+  return res.status(403).json({
+    code: "PLATFORM_CATEGORIES_LOCKED",
+    message: "Categories are platform-defined. Activate or deactivate an existing category instead of creating custom field schemas.",
+  });
 };
 
 const updateAdminCategory = async (req, res) => {
@@ -189,38 +132,18 @@ const updateAdminCategory = async (req, res) => {
     if (req.body.icon !== undefined) category.icon = req.body.icon || null;
     if (req.body.isActive != null) category.isActive = Boolean(req.body.isActive);
     if (req.body.sortOrder != null) category.sortOrder = Number(req.body.sortOrder) || 0;
-    if (req.body.supportsOptions != null) category.supportsOptions = parseBoolean(req.body.supportsOptions, true);
     if (req.body.slug) {
-      const nextSlug = slugify(req.body.slug);
-      if (nextSlug && nextSlug !== category.slug) {
-        const clash = await ServiceCategory.findOne({ slug: nextSlug, _id: { $ne: category._id } });
-        if (clash) return res.status(409).json({ message: "Slug already in use." });
-        category.slug = nextSlug;
-      }
+      return res.status(403).json({
+        code: "PLATFORM_CATEGORIES_LOCKED",
+        message: "Category slugs are platform-defined and cannot be changed.",
+      });
     }
-    if (req.body.defaults?.suggestedCancelWindowHours != null) {
-      category.defaults.suggestedCancelWindowHours = Math.max(
-        0,
-        Number(req.body.defaults.suggestedCancelWindowHours)
-      );
+    if (req.body.supportsOptions != null || req.body.listingFieldSchema || req.body.optionFieldSchema || req.body.bookingFieldSchema) {
+      return res.status(403).json({
+        code: "PLATFORM_FIELDS_LOCKED",
+        message: "Listing, inventory, and booking fields are defined by the platform domain, not by admin.",
+      });
     }
-    if (Array.isArray(req.body.listingFieldSchema)) {
-      category.listingFieldSchema = normalizeFieldSchema(req.body.listingFieldSchema, "listing");
-    }
-    if (Array.isArray(req.body.optionFieldSchema)) {
-      category.optionFieldSchema = normalizeFieldSchema(req.body.optionFieldSchema, "option");
-    }
-    if (Array.isArray(req.body.bookingFieldSchema)) {
-      category.bookingFieldSchema = normalizeFieldSchema(req.body.bookingFieldSchema, "booking");
-    }
-    if (req.body.availabilityPolicy != null) {
-      category.availabilityPolicy = normalizeAvailabilityPolicy(req.body.availabilityPolicy);
-    }
-    if (req.body.consumptionPolicy != null) {
-      category.consumptionPolicy = normalizeConsumptionPolicy(req.body.consumptionPolicy);
-    }
-
-    applySupportsOptionsSideEffects(category);
     await category.save();
     await syncCategoryToServices(category);
 
@@ -231,36 +154,11 @@ const updateAdminCategory = async (req, res) => {
   }
 };
 
-const updateAdminCategoryFields = async (req, res) => {
-  try {
-    const category = await ServiceCategory.findById(req.params.id);
-    if (!category) return res.status(404).json({ message: "Category not found." });
-
-    if (Array.isArray(req.body.listingFieldSchema)) {
-      category.listingFieldSchema = normalizeFieldSchema(req.body.listingFieldSchema, "listing");
-    }
-    if (Array.isArray(req.body.optionFieldSchema)) {
-      category.optionFieldSchema = normalizeFieldSchema(req.body.optionFieldSchema, "option");
-    }
-    if (Array.isArray(req.body.bookingFieldSchema)) {
-      category.bookingFieldSchema = normalizeFieldSchema(req.body.bookingFieldSchema, "booking");
-    }
-    if (req.body.supportsOptions != null) category.supportsOptions = parseBoolean(req.body.supportsOptions, true);
-    if (req.body.availabilityPolicy != null) {
-      category.availabilityPolicy = normalizeAvailabilityPolicy(req.body.availabilityPolicy);
-    }
-    if (req.body.consumptionPolicy != null) {
-      category.consumptionPolicy = normalizeConsumptionPolicy(req.body.consumptionPolicy);
-    }
-
-    applySupportsOptionsSideEffects(category);
-    await category.save();
-    await syncCategoryToServices(category);
-    clearCache("public:");
-    return res.json({ message: "Category field schemas updated.", category: serializeCategory(category, { includeInactive: true }) });
-  } catch (error) {
-    return res.status(500).json({ message: "Failed to update category fields.", error: error.message });
-  }
+const updateAdminCategoryFields = async (_req, res) => {
+  return res.status(403).json({
+    code: "PLATFORM_FIELDS_LOCKED",
+    message: "Category booking contracts are defined in code. Admin cannot edit listing, inventory, or booking fields.",
+  });
 };
 
 const deleteAdminCategory = async (req, res) => {

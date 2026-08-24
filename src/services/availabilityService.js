@@ -150,6 +150,11 @@ const normalizeAvailabilityPayload = (body = {}, { scope = "service", trackCapac
   };
 };
 
+const listAvailabilitiesForService = async (serviceId) => {
+  if (!serviceId) return [];
+  return ServiceAvailability.find({ serviceId, isActive: { $ne: false } }).sort({ scope: 1, createdAt: 1 }).lean();
+};
+
 const findAvailability = async ({ serviceId, optionId = null }) => {
   if (optionId) {
     return ServiceAvailability.findOne({ serviceId, optionId, scope: "option", isActive: { $ne: false } });
@@ -441,6 +446,7 @@ module.exports = {
   serializeAvailability,
   normalizeAvailabilityPayload,
   findAvailability,
+  listAvailabilitiesForService,
   upsertAvailability,
   buildConsumptionFromInput,
   validateConsumptionAgainstAvailability,

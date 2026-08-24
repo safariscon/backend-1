@@ -92,6 +92,37 @@ const hotelSchema = new mongoose.Schema(
       lowercase: true,
       index: true,
     },
+    domain: {
+      type: String,
+      enum: ["accommodation", "transport", "experiences", "dining", "venues"],
+      default: "experiences",
+      index: true,
+    },
+    subtype: {
+      type: String,
+      default: "",
+      trim: true,
+      lowercase: true,
+    },
+    paymentPolicy: {
+      depositPercentage: { type: Number, default: 50, min: 0, max: 100 },
+      remainingPaymentMethod: {
+        type: String,
+        enum: ["PAY_AT_ARRIVAL", "PAY_AT_CHECKOUT", "PAY_AT_BOOKING"],
+        default: "PAY_AT_ARRIVAL",
+      },
+      currency: { type: String, default: "RWF", trim: true, uppercase: true },
+    },
+    cancellationPolicy: {
+      type: { type: String, default: "moderate", trim: true },
+      freeCancellationUntilHours: { type: Number, default: 24, min: 0, max: 2160 },
+      depositRefundable: { type: Boolean, default: false },
+      cancellationFeePercentage: { type: Number, default: 100, min: 0, max: 100 },
+    },
+    customFields: {
+      type: mongoose.Schema.Types.Mixed,
+      default: [],
+    },
     supportsOptions: {
       type: Boolean,
       default: true,

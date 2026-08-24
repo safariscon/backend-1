@@ -1,4 +1,4 @@
-const DEFAULT_COMMISSION_PERCENTAGE = 5;
+const DEFAULT_COMMISSION_PERCENTAGE = 10;
 
 const toFiniteNumber = (value, fallback = 0) => {
   const parsed = Number(value);
