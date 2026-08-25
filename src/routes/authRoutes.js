@@ -16,6 +16,7 @@ const {
   acceptTerms,
   updateProfile,
   uploadProfileAvatar,
+  changePassword,
 } = require("../controllers/authController");
 const { protect, protectAllowWithoutTerms, optionalProtect, adminOnly } = require("../middleware/authMiddleware");
 const { imageUpload } = require("../middleware/uploadMiddleware");
@@ -36,6 +37,7 @@ router.post("/email/verify-otp", verifyEmailOtp);
 router.post("/forgot-password", forgotPassword);
 router.post("/reset-password", resetPassword);
 router.post("/accept-terms", protectAllowWithoutTerms, acceptTerms);
+router.post("/change-password", protect, changePassword);
 router.put("/profile", protect, updateProfile);
 router.post("/profile/avatar", protect, imageUpload.single("image"), uploadProfileAvatar);
 router.post("/admin/register-business", protect, adminOnly, registerBusinessByAdmin);

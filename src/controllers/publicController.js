@@ -15,6 +15,7 @@ const {
 } = require("../utils/publicInventory");
 const { remainingForStay, optionQuantity, isStayLike, loadStayOccupancy, windowAllowsStay } = require("../services/occupancyService");
 const { reviewStatsForService } = require("../controllers/reviewController");
+const { attachProximity, parseNearby } = require("../utils/nearbySearch");
 const { buildPublicCatalogFilter, publicCatalogCacheKey } = require("../utils/serviceFilters");
 const QRCode = require("qrcode");
 const { storeBookingPdf, getBookingPdfDownloadUrl } = require("../services/bookingPdfStorage");
@@ -35,30 +36,35 @@ const listPublicHotels = async (req, res) => {
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(60, Math.max(1, Number(req.query.limit) || 60));
     const stayDates = stayDatesFromQuery(req.query);
+    const nearby = parseNearby(req.query);
+    const locationText = String(req.query.location || req.query.district || req.query.province || "").trim();
     const cacheKey = publicCatalogCacheKey(req.query, page, limit);
-    const cached = stayDates.checkIn ? null : getCache(cacheKey);
+    const cached = stayDates.checkIn || nearby ? null : getCache(cacheKey);
     if (cached) return res.json(cached);
 
     const catalogQuery = Hotel.find(buildPublicCatalogFilter(req.query))
       .select(
-        "type categoryId categorySlug domain subtype location locationDetails catalogLocation images primaryImage description listingAttributes paymentPolicy cancellationPolicy supportsOptions promotion bookingRules bookingMode availabilityTable bookingForm approvalStatus status availableQuantity quantityRemaining inventoryStatus commissionPercentage cancelPenaltyPercent cancelWindowHours createdAt updatedAt"
+        "type categoryId categorySlug domain subtype location locationDetails catalogLocation serviceLocation images primaryImage description listingAttributes paymentPolicy cancellationPolicy supportsOptions promotion bookingRules bookingMode availabilityTable bookingForm approvalStatus status availableQuantity quantityRemaining inventoryStatus commissionPercentage cancelPenaltyPercent cancelWindowHours createdAt updatedAt"
       )
       .sort({ type: 1, createdAt: 1, _id: 1 });
 
-    const hotels = stayDates.checkIn
-      ? await catalogQuery.limit(200).lean()
+    const needsClientFilter = Boolean(stayDates.checkIn || nearby);
+    const hotels = needsClientFilter
+      ? await catalogQuery.limit(400).lean()
       : await catalogQuery.skip((page - 1) * limit).limit(limit).lean();
 
-    const inventoryByService = await attachPublicInventory(hotels, req.query);
+    const locatedHotels = nearby ? attachProximity(hotels, nearby, locationText) : hotels;
+    const inventoryByService = await attachPublicInventory(locatedHotels, req.query);
     const datedHotels = stayDates.checkIn
-      ? hotels
-          .filter((hotel) =>
-            listingHasStayAvailability(hotel, inventoryByService.get(String(hotel._id)) || [], req.query)
-          )
-          .slice((page - 1) * limit, page * limit)
-      : hotels;
+      ? locatedHotels.filter((hotel) =>
+          listingHasStayAvailability(hotel, inventoryByService.get(String(hotel._id)) || [], req.query)
+        )
+      : locatedHotels;
+    const pageHotels = needsClientFilter
+      ? datedHotels.slice((page - 1) * limit, page * limit)
+      : datedHotels;
     const anonymousHotels = anonymizeBusinessList(
-      datedHotels.map((hotel) => {
+      pageHotels.map((hotel) => {
         const options = inventoryByService.get(String(hotel._id)) || [];
         return {
           ...hotel,
@@ -66,24 +72,30 @@ const listPublicHotels = async (req, res) => {
           availabilityTable: mergeOptionsIntoAvailabilityTable(hotel.availabilityTable, options),
         };
       })
-    ).sort(
-      (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
     );
+    if (!nearby) {
+      anonymousHotels.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    }
     const payload = {
       hotels: anonymousHotels,
       businesses: anonymousHotels,
       page,
       limit,
-      hasMore: anonymousHotels.length === limit,
+      hasMore: needsClientFilter
+        ? page * limit < datedHotels.length
+        : anonymousHotels.length === limit,
       filters: {
         category: String(req.query.category || req.query.type || "").trim(),
-        location: String(req.query.location || req.query.district || req.query.province || "").trim(),
+        location: locationText,
+        lat: nearby ? nearby.lat : "",
+        lng: nearby ? nearby.lng : "",
+        radiusKm: nearby ? nearby.radiusKm : "",
         search: String(req.query.search || req.query.q || "").trim(),
         checkIn: stayDates.checkIn,
         checkOut: stayDates.checkOut,
       },
     };
-    if (!stayDates.checkIn) setCache(cacheKey, payload);
+    if (!stayDates.checkIn && !nearby) setCache(cacheKey, payload);
     return res.json(payload);
   } catch (error) {
     return res.status(500).json({

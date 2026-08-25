@@ -85,7 +85,7 @@ const anonymizeBusiness = (business, guestName) => {
     domain: business.domain || "",
     subtype: business.subtype || categorySlug,
     supportsOptions: business.supportsOptions !== false,
-    catalogLocation: business.catalogLocation
+      catalogLocation: business.catalogLocation
       ? {
           latitude: business.catalogLocation.latitude,
           longitude: business.catalogLocation.longitude,
@@ -96,6 +96,7 @@ const anonymizeBusiness = (business, guestName) => {
           area: business.catalogLocation.area,
         }
       : null,
+    distanceKm: Number.isFinite(Number(business.distanceKm)) ? Number(business.distanceKm) : null,
     amenities: Array.isArray(business.listingAttributes?.amenities) ? business.listingAttributes.amenities : [],
     services: [],
     options: Array.isArray(business.options) ? business.options : [],

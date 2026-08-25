@@ -6,6 +6,7 @@ const ServiceCategory = require("../models/ServiceCategory");
 const { ensureSeededCategories } = require("./ensureCategories");
 const { snapshotCategorySchemas, slugify } = require("./fieldSchema");
 const { migrateAvailabilityRowsToOptions } = require("./serviceOptionSync");
+const { withCatalogGeo } = require("./catalogLocation");
 
 const run = async () => {
   await connectDB();
@@ -33,7 +34,7 @@ const run = async () => {
     };
 
     if (!hotel.catalogLocation?.latitude && hotel.serviceLocation?.latitude != null) {
-      updates.catalogLocation = {
+      updates.catalogLocation = withCatalogGeo({
         latitude: hotel.serviceLocation.latitude,
         longitude: hotel.serviceLocation.longitude,
         latitudeRaw: String(hotel.serviceLocation.latitude),
@@ -47,7 +48,9 @@ const run = async () => {
         placeName: hotel.serviceLocation.name || hotel.name || "",
         placeId: hotel.serviceLocation.placeId || "",
         locationSource: hotel.serviceLocation.locationSource || "map_click",
-      };
+      });
+    } else if (hotel.catalogLocation?.latitude && !hotel.catalogLocation?.geo?.coordinates?.length) {
+      updates.catalogLocation = withCatalogGeo(hotel.catalogLocation);
     }
 
     if (hotel.contactDetails?.phone && !hotel.contactDetails?.phoneE164) {

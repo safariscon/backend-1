@@ -39,7 +39,7 @@ const {
   normalizeCancellationPolicy,
 } = require("../domains");
 const { normalizeContactDetails } = require("../utils/phoneE164");
-const { normalizeCatalogLocation } = require("../utils/catalogLocation");
+const { normalizeCatalogLocation, withCatalogGeo } = require("../utils/catalogLocation");
 const {
   syncServiceOptionsToAvailabilityTable,
   migrateAvailabilityRowsToOptions,
@@ -921,23 +921,25 @@ const upsertMyService = async (req, res) => {
       });
     }
 
-    const catalogLocation = catalogLocationResult.ok
-      ? catalogLocationResult.value
-      : {
-          latitude: serviceLocation.latitude,
-          longitude: serviceLocation.longitude,
-          latitudeRaw: String(serviceLocation.latitude),
-          longitudeRaw: String(serviceLocation.longitude),
-          formattedAddress: serviceLocation.formattedAddress || serviceLocation.fullAddress,
-          country: serviceLocation.country || "Rwanda",
-          countryCode: "RW",
-          state: serviceLocation.province || "",
-          city: serviceLocation.district || "",
-          area: serviceLocation.sector || "",
-          placeName: serviceLocation.name || "",
-          placeId: serviceLocation.placeId || "",
-          locationSource: serviceLocation.locationSource || "map_click",
-        };
+    const catalogLocation = withCatalogGeo(
+      catalogLocationResult.ok
+        ? catalogLocationResult.value
+        : {
+            latitude: serviceLocation.latitude,
+            longitude: serviceLocation.longitude,
+            latitudeRaw: String(serviceLocation.latitude),
+            longitudeRaw: String(serviceLocation.longitude),
+            formattedAddress: serviceLocation.formattedAddress || serviceLocation.fullAddress,
+            country: serviceLocation.country || "Rwanda",
+            countryCode: "RW",
+            state: serviceLocation.province || "",
+            city: serviceLocation.district || "",
+            area: serviceLocation.sector || "",
+            placeName: serviceLocation.name || "",
+            placeId: serviceLocation.placeId || "",
+            locationSource: serviceLocation.locationSource || "map_click",
+          }
+    );
 
     if (!isCoordinateInsideRwanda(catalogLocation.latitude, catalogLocation.longitude)) {
       return res.status(400).json({ message: "Selected service location must be inside Rwanda." });

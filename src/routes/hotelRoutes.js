@@ -42,8 +42,8 @@ router.post("/bookings/complete-verified", protect, sellerOnly, completeVerified
 router.get("/booking-verification/:lookup", protect, sellerOnly, verifyMyBooking);
 router.put("/bookings/:bookingId/status", protect, sellerOnly, updateBookingStatus);
 router.get("/rooms", protect, sellerOnly, listMyRooms);
-router.get("/service-categories", protect, sellerOnly, listPublicCategories);
-router.get("/service-categories/:idOrSlug", protect, sellerOnly, getPublicCategory);
+router.get("/service-categories", listPublicCategories);
+router.get("/service-categories/:idOrSlug", getPublicCategory);
 router.get("/services", protect, sellerOnly, listMyServices);
 router.get("/services/:serviceId", protect, sellerOnly, getMyService);
 router.get("/services/:serviceId/options", protect, sellerOnly, listMyServiceOptions);

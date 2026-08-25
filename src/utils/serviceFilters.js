@@ -1,3 +1,5 @@
+const { parseNearby } = require("./nearbySearch");
+
 const escapeRegex = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const regexContains = (value) => {
@@ -26,6 +28,12 @@ const locationClause = (location) => {
       { "serviceLocation.province": loc },
       { "serviceLocation.district": loc },
       { "serviceLocation.sector": loc },
+      { "serviceLocation.formattedAddress": loc },
+      { "catalogLocation.city": loc },
+      { "catalogLocation.area": loc },
+      { "catalogLocation.state": loc },
+      { "catalogLocation.placeName": loc },
+      { "catalogLocation.formattedAddress": loc },
     ],
   };
 };
@@ -63,10 +71,11 @@ const buildPublicCatalogFilter = (query = {}) => {
   const category = String(query.category || query.type || "").trim();
   const location = String(query.location || query.district || query.province || "").trim();
   const search = String(query.search || query.q || "").trim();
+  const nearby = parseNearby(query);
   return andFilters([
     approvedCatalogClause(),
     category ? { type: regexContains(category) } : null,
-    locationClause(location),
+    nearby ? null : locationClause(location),
     publicSearchClause(search),
   ]);
 };
@@ -77,7 +86,11 @@ const publicCatalogCacheKey = (query = {}, page, limit) => {
   const search = String(query.search || query.q || "").trim().toLowerCase();
   const checkIn = String(query.checkIn || query.startDate || "").trim();
   const checkOut = String(query.checkOut || query.endDate || "").trim();
-  return `public:hotels:${page}:${limit}:${category}:${location}:${search}:${checkIn}:${checkOut}`;
+  const nearby = parseNearby(query);
+  const geo = nearby
+    ? `${nearby.lat.toFixed(4)}:${nearby.lng.toFixed(4)}:${nearby.radiusKm}`
+    : "";
+  return `public:hotels:${page}:${limit}:${category}:${location}:${search}:${checkIn}:${checkOut}:${geo}`;
 };
 
 const buildAdminServiceFilter = (query = {}, ownerUserId) => {

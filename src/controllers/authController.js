@@ -1231,6 +1231,34 @@ const resetPassword = async (req, res) => {
   }
 };
 
+const changePassword = async (req, res) => {
+  try {
+    const currentPassword = String(req.body.currentPassword || "");
+    const newPassword = String(req.body.newPassword || "");
+    const confirmPassword = String(req.body.confirmPassword || newPassword);
+    if (newPassword.length < 8) {
+      return res.status(400).json({ message: "New password must be at least 8 characters." });
+    }
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ message: "Passwords do not match." });
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ message: "User not found." });
+    const matches = await bcrypt.compare(currentPassword, user.password || "");
+    if (!matches) {
+      return res.status(400).json({ message: "Current password is incorrect." });
+    }
+
+    user.password = await bcrypt.hash(newPassword, 12);
+    user.passwordChangedAt = new Date();
+    await user.save();
+    return res.json({ message: "Password updated." });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to change password.", error: error.message });
+  }
+};
+
 const acceptTerms = async (req, res) => {
   try {
     if (!hasAcceptedTerms(req.body) && req.body.accepted !== true) {
@@ -1318,6 +1346,7 @@ module.exports = {
   verifyEmailOtp,
   forgotPassword,
   resetPassword,
+  changePassword,
   acceptTerms,
   updateProfile,
   uploadProfileAvatar,

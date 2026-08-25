@@ -150,6 +150,10 @@ const hotelSchema = new mongoose.Schema(
       placeName: { type: String, default: "", trim: true },
       placeId: { type: String, default: "", trim: true },
       locationSource: { type: String, default: "search", trim: true },
+      geo: {
+        type: { type: String, enum: ["Point"] },
+        coordinates: { type: [Number] },
+      },
     },
     agreementTerms: {
       setAtApproval: { type: Boolean, default: false },
@@ -452,6 +456,16 @@ hotelSchema.index({ location: 1, type: 1, createdAt: -1 });
 hotelSchema.index({ basePrice: 1, createdAt: -1 });
 hotelSchema.index({ approvalStatus: 1, status: 1, createdAt: -1 });
 hotelSchema.index({ ownerUserId: 1, createdAt: -1 });
+hotelSchema.index({ "catalogLocation.geo": "2dsphere" }, { sparse: true });
+
+hotelSchema.pre("validate", function syncCatalogGeo() {
+  const loc = this.catalogLocation;
+  const lat = Number(loc?.latitude);
+  const lng = Number(loc?.longitude);
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    this.catalogLocation.geo = { type: "Point", coordinates: [lng, lat] };
+  }
+});
 
 hotelSchema.pre("validate", function rejectInlineImages() {
   const candidates = [...(this.images || []), this.primaryImage];

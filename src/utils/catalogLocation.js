@@ -1,3 +1,22 @@
+const withCatalogGeo = (value = {}) => {
+  const latitude = Number(value.latitude);
+  const longitude = Number(value.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    const next = { ...value };
+    delete next.geo;
+    return next;
+  }
+  return {
+    ...value,
+    latitude,
+    longitude,
+    geo: {
+      type: "Point",
+      coordinates: [longitude, latitude],
+    },
+  };
+};
+
 const normalizeCatalogLocation = (input = {}) => {
   const latitudeRaw = input.latitudeRaw != null
     ? String(input.latitudeRaw).trim()
@@ -29,7 +48,7 @@ const normalizeCatalogLocation = (input = {}) => {
 
   return {
     ok: true,
-    value: {
+    value: withCatalogGeo({
       latitude,
       longitude,
       latitudeRaw: latitudeRaw || String(latitude),
@@ -43,8 +62,8 @@ const normalizeCatalogLocation = (input = {}) => {
       placeName: String(input.placeName || input.name || "").trim(),
       placeId: String(input.placeId || "").trim(),
       locationSource: String(input.locationSource || "search").trim() || "search",
-    },
+    }),
   };
 };
 
-module.exports = { normalizeCatalogLocation };
+module.exports = { normalizeCatalogLocation, withCatalogGeo };
