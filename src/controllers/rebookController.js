@@ -6,6 +6,7 @@ const SiteSetting = require("../models/SiteSetting");
 const AuditLog = require("../models/AuditLog");
 const RebookRequest = require("../models/RebookRequest");
 const { REALTIME_EVENTS, emitHotelRealtime, emitRealtime, emitUserRealtime } = require("../utils/realtime");
+const { releaseBookingHold } = require("../services/bookingHoldService");
 
 const DEFAULT_SETTINGS = Object.freeze({ requestDeadlineHours: 24, rebookIdValidityHours: 72 });
 const ACTIVE_REBOOK_STATUSES = ["pending", "approved", "rebook_id_generated"];
@@ -378,6 +379,11 @@ const approveRefund = async (req, res) => {
     );
     if (!request) return res.status(409).json({ message: "Refund was already processed." });
     await Booking.updateOne({ _id: booking._id }, { $set: { status: "cancelled", "cancellation.cancelledAt": now, "cancellation.refundAmount": refundAmount } });
+    try {
+      await releaseBookingHold(booking);
+    } catch (error) {
+      console.warn("Failed to release nights for refunded booking:", error.message);
+    }
     await writeAudit({ action: "rebook-refund-approved", actor: req.user, request, metadata: { refundAmount, refundReference, formula: "20% of paid 30% deposit" } });
     notifyChange(request, "refund-approved");
     return res.json({ message: `Refund approved for ${refundAmount.toLocaleString()} RWF.`, request: await populateRequest(RebookRequest.findById(request._id)) });

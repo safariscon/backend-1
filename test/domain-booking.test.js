@@ -138,6 +138,28 @@ test("platform categories expose domain metadata", () => {
   assert.equal(hotel.formMode, "domain");
 });
 
+test("car-rentals slug alias maps to transport", () => {
+  const category = enrichCategory({ slug: "car-rentals" });
+  assert.equal(category.domain, "transport");
+  assert.equal(category.subtype, "car-rental");
+});
+
+test("car rental booking enforces max rental days", () => {
+  const failed = validateBookingDetails({
+    categoryOrSlug: "car-rental",
+    payload: {
+      pickupLocation: "Kigali airport",
+      returnLocation: "Kigali airport",
+      pickupDateTime: "2026-09-10T10:00:00.000Z",
+      returnDateTime: "2026-09-20T10:00:00.000Z",
+      driverAge: 25,
+      driverLicenseNumber: "RW123",
+      numberOfDrivers: 1,
+    },
+    listing: { listingAttributes: { minimumDriverAge: 21, withDriver: false, minRentalDays: 1, maxRentalDays: 7 } },
+  });
+  assert.equal(failed.ok, false);
+});
 test("car rental inventory accepts vehicle specs", () => {
   const result = validateInventoryDetails("car-rental", {
     make: "Toyota",

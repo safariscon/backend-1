@@ -41,6 +41,7 @@ const { setDbReady } = require("./middleware/databaseMiddleware");
 const { getXentripayPublicStatus } = require("./services/xentripayService");
 const { runRebookExpiryCleanup } = require("./controllers/rebookController");
 const { runBookingNoActionRefundCleanup, runPendingPaymentSync, runReleasedProviderPayouts } = require("./controllers/bookingController");
+const { runUnpaidBookingHoldCleanup } = require("./services/bookingHoldService");
 
 const PORT = process.env.PORT || 5000;
 const REBOOK_EXPIRY_INTERVAL_MS = 5 * 60 * 1000;
@@ -66,6 +67,13 @@ const logBookingRefundSummary = (summary) => {
   console.log(`Booking refund cleanup applied ${total} no-action refund(s).`);
 };
 
+const logUnpaidHoldSummary = (summary) => {
+  const released = Number(summary?.releasedOrphans || 0);
+  const expired = Number(summary?.expiredUnpaid || 0);
+  if (!released && !expired) return;
+  console.log(`Unpaid booking holds released: orphans=${released}, expired=${expired}`);
+};
+
 const startRebookExpiryCleanup = () => {
   let isRunning = false;
 
@@ -75,6 +83,7 @@ const startRebookExpiryCleanup = () => {
     try {
       logRebookExpirySummary(await runRebookExpiryCleanup());
       logBookingRefundSummary(await runBookingNoActionRefundCleanup());
+      logUnpaidHoldSummary(await runUnpaidBookingHoldCleanup());
       await runPendingPaymentSync();
       try {
         await runReleasedProviderPayouts();

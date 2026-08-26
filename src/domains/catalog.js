@@ -159,7 +159,7 @@ const PLATFORM_CATEGORIES = [
     availabilityPolicy: {
       listingRequiresAvailability: false,
       optionRequiresAvailability: true,
-      modes: { dateWindow: true, daysOfWeek: true, timeOfDay: true },
+      modes: { dateWindow: true, daysOfWeek: false, timeOfDay: false },
       trackCapacity: true,
     },
     consumptionPolicy: {
@@ -180,13 +180,22 @@ const PLATFORM_CATEGORIES = [
         sortOrder: 2,
       }),
       field("withDriver", "With driver?", "boolean", { sortOrder: 3 }),
+      field("fuelType", "Fuel type", "select", {
+        options: ["Petrol", "Diesel", "Hybrid / Electric"],
+        sortOrder: 4,
+        helpText: "Petrol for most cars, diesel for efficiency, hybrid or electric for lower emissions.",
+      }),
       field("fuelPolicy", "Fuel policy", "select", {
         options: ["Full-to-full", "Same-to-same", "Prepaid"],
-        sortOrder: 4,
+        sortOrder: 5,
       }),
-      field("insuranceIncluded", "Insurance included?", "boolean", { sortOrder: 5 }),
-      field("minimumDriverAge", "Minimum driver age", "number", { required: true, sortOrder: 6, validation: { min: 18 } }),
-      field("depositNote", "Security deposit note", "textarea", { sortOrder: 7 }),
+      field("insuranceIncluded", "Insurance included?", "boolean", { sortOrder: 6 }),
+      field("minimumDriverAge", "Minimum driver age", "number", { required: true, sortOrder: 7, validation: { min: 18 } }),
+      field("pickupTime", "Pickup from", "time", { sortOrder: 8 }),
+      field("returnTime", "Return by", "time", { sortOrder: 9 }),
+      field("minRentalDays", "Minimum rental (days)", "number", { sortOrder: 10, validation: { min: 1 } }),
+      field("maxRentalDays", "Maximum rental (days)", "number", { sortOrder: 11, validation: { min: 1 } }),
+      field("depositNote", "Security deposit note", "textarea", { sortOrder: 12 }),
     ],
     inventoryFields: [
       field("make", "Make", "text", { appliesTo: "option", sortOrder: 1 }),
@@ -194,12 +203,13 @@ const PLATFORM_CATEGORIES = [
       field("seats", "Seats", "number", { required: true, appliesTo: "option", sortOrder: 3, validation: { min: 1 } }),
       field("luggage", "Luggage capacity", "text", { appliesTo: "option", sortOrder: 4 }),
       field("ac", "Air conditioning", "boolean", { appliesTo: "option", sortOrder: 5 }),
+      field("quantity", "Number of cars of this type", "number", { appliesTo: "option", sortOrder: 6, validation: { min: 1 } }),
     ],
     bookingFields: [
       field("pickupLocation", "Pickup location", "text", { required: true, appliesTo: "booking", sortOrder: 1 }),
       field("returnLocation", "Return location", "text", { required: true, appliesTo: "booking", sortOrder: 2 }),
-      field("pickupDateTime", "Pickup date/time", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 3 }),
-      field("returnDateTime", "Return date/time", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 4 }),
+      field("pickupDateTime", "Pickup date", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 3 }),
+      field("returnDateTime", "Return date", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 4 }),
       field("driverAge", "Driver age", "number", { required: true, appliesTo: "booking", sortOrder: 5, validation: { min: 18 } }),
       field("driverLicenseNumber", "Driver license number", "text", {
         required: true,
@@ -271,7 +281,7 @@ const PLATFORM_CATEGORIES = [
     availabilityPolicy: {
       listingRequiresAvailability: false,
       optionRequiresAvailability: true,
-      modes: { dateWindow: true, daysOfWeek: true, timeOfDay: true },
+      modes: { dateWindow: true, daysOfWeek: false, timeOfDay: false },
       trackCapacity: true,
     },
     consumptionPolicy: {
@@ -288,8 +298,8 @@ const PLATFORM_CATEGORIES = [
     bookingFields: [
       field("pickupLocation", "Pickup location", "text", { required: true, appliesTo: "booking", sortOrder: 1 }),
       field("returnLocation", "Return location", "text", { required: true, appliesTo: "booking", sortOrder: 2 }),
-      field("pickupDateTime", "Pickup date/time", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 3 }),
-      field("returnDateTime", "Return date/time", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 4 }),
+      field("pickupDateTime", "Pickup date", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 3 }),
+      field("returnDateTime", "Return date", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 4 }),
     ],
   },
   {
@@ -612,7 +622,18 @@ const PLATFORM_CATEGORIES = [
 
 const bySlug = new Map(PLATFORM_CATEGORIES.map((item) => [item.slug, item]));
 
-const getCategoryDefinition = (slug) => bySlug.get(String(slug || "").trim().toLowerCase()) || null;
+const SLUG_ALIASES = {
+  "car-rentals": "car-rental",
+  cars: "car-rental",
+  "motorbike-and-scooter-rentals": "motorbike",
+  "taxi-and-ride-services": "taxi",
+  "bus-and-minivan-charters": "taxi",
+};
+
+const getCategoryDefinition = (slug) => {
+  const key = String(slug || "").trim().toLowerCase();
+  return bySlug.get(key) || bySlug.get(SLUG_ALIASES[key] || "") || null;
+};
 
 const listCategoryDefinitions = () => PLATFORM_CATEGORIES.slice();
 

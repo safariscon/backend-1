@@ -91,3 +91,13 @@ test("stay listing is hidden when requested dates have no remaining options", ()
     true
   );
 });
+
+test("cancelled and failed bookings do not occupy stay nights", () => {
+  const { consumptionCountsTowardOccupancy } = require("../src/services/occupancyService");
+  const consumption = { status: "pending", consumptionStartDate: "2026-08-25", consumptionEndDate: "2026-08-29", units: 1 };
+  assert.equal(consumptionCountsTowardOccupancy(consumption, { status: "cancelled" }), false);
+  assert.equal(consumptionCountsTowardOccupancy(consumption, { status: "rejected" }), false);
+  assert.equal(consumptionCountsTowardOccupancy(consumption, null), false);
+  assert.equal(consumptionCountsTowardOccupancy(consumption, { status: "waiting-for-payment" }), true);
+  assert.equal(consumptionCountsTowardOccupancy({ status: "cancelled" }, { status: "waiting-for-payment" }), false);
+});

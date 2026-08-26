@@ -11,6 +11,7 @@ const {
   normalizeCancellationPolicy,
   splitBookingAmounts,
   policyFromListing,
+  remainingPaymentDuePhrase,
 } = require("./shared/policies");
 
 const MODULES = { accommodation, transport, experiences, dining, venues };
@@ -23,6 +24,7 @@ const resolveDefinition = (categoryOrSlug) => {
   return (
     getCategoryDefinition(categoryOrSlug.slug) ||
     getCategoryDefinition(categoryOrSlug.categorySlug) ||
+    getCategoryDefinition(categoryOrSlug.subtype) ||
     getCategoryDefinition(categoryOrSlug.type)
   );
 };
@@ -141,6 +143,7 @@ module.exports = {
   normalizeCancellationPolicy,
   splitBookingAmounts,
   policyFromListing,
+  remainingPaymentDuePhrase,
   calculateStayQuote,
   sanitizeListingAttributesForPublic,
 };

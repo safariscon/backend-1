@@ -12,6 +12,7 @@ const {
 const VEHICLE_CLASSES = ["Economy", "Compact", "SUV", "Van", "Luxury"];
 const TRANSMISSIONS = ["Automatic", "Manual"];
 const FUEL_POLICIES = ["Full-to-full", "Same-to-same", "Prepaid"];
+const FUEL_TYPES = ["Petrol", "Diesel", "Hybrid / Electric"];
 
 const splitDateTime = (iso) => {
   if (!iso) return { date: "", time: "" };
@@ -49,15 +50,29 @@ const validateListing = (input = {}, subtype = "car-rental") => {
   if (!Number.isFinite(minimumDriverAge) || minimumDriverAge < 18) {
     errors.push("Minimum driver age must be at least 18.");
   }
+  const pickupTime = cleanText(raw.pickupTime, 8) || "08:00";
+  const returnTime = cleanText(raw.returnTime, 8) || "18:00";
+  const minRentalDays = asInteger(raw.minRentalDays) || 1;
+  const maxRentalDays = asInteger(raw.maxRentalDays) || 30;
+  const fuelTypeRaw = cleanText(raw.fuelType, 40);
+  const fuelType = FUEL_TYPES.includes(fuelTypeRaw) ? fuelTypeRaw : (fuelTypeRaw ? "" : "Petrol");
+  if (fuelTypeRaw && !FUEL_TYPES.includes(fuelTypeRaw)) errors.push("Choose a valid fuel type.");
+  if (minRentalDays < 1) errors.push("Minimum rental must be at least 1 day.");
+  if (maxRentalDays < minRentalDays) errors.push("Maximum rental must be at least the minimum.");
   if (errors.length) return fail(errors);
   return ok({
     vehicleClass,
     transmission,
     withDriver: asBoolean(raw.withDriver),
+    fuelType: fuelType || "Petrol",
     fuelPolicy: FUEL_POLICIES.includes(raw.fuelPolicy) ? raw.fuelPolicy : "Full-to-full",
     insuranceIncluded: asBoolean(raw.insuranceIncluded),
     minimumDriverAge,
     depositNote: cleanText(raw.depositNote, 1000),
+    pickupTime,
+    returnTime,
+    minRentalDays,
+    maxRentalDays,
   });
 };
 
@@ -65,7 +80,9 @@ const validateInventory = (input = {}) => {
   const raw = asObject(input);
   const errors = [];
   const seats = raw.seats == null || raw.seats === "" ? null : asInteger(raw.seats);
+  const quantity = raw.quantity == null || raw.quantity === "" ? 1 : asInteger(raw.quantity);
   if (seats != null && (!Number.isFinite(seats) || seats < 1)) errors.push("Seats must be at least 1.");
+  if (!Number.isFinite(quantity) || quantity < 1) errors.push("Number of vehicles must be at least 1.");
   if (errors.length) return fail(errors);
   return ok({
     make: cleanText(raw.make, 80),
@@ -73,6 +90,7 @@ const validateInventory = (input = {}) => {
     seats,
     luggage: cleanText(raw.luggage, 80),
     ac: asBoolean(raw.ac),
+    quantity,
   });
 };
 
@@ -97,6 +115,24 @@ const validateBooking = ({ payload = {}, listing = {}, subtype = "car-rental" } 
     if (pickupDateTime && returnDateTime && new Date(returnDateTime) <= new Date(pickupDateTime)) {
       errors.push("Return time must be after pickup time.");
     }
+    const minRentalDays = asInteger(listingDetails.minRentalDays) || 1;
+    const maxRentalDays = asInteger(listingDetails.maxRentalDays) || 0;
+    const pickupDay = String(raw.pickupDateTime || pickupDateTime || "").slice(0, 10);
+    const returnDay = String(raw.returnDateTime || returnDateTime || "").slice(0, 10);
+    if (pickupDay && returnDay && returnDay <= pickupDay) {
+      errors.push("Return date must be after pickup date.");
+    }
+    if (pickupDay && returnDay && returnDay > pickupDay) {
+      const days = Math.round((new Date(`${returnDay}T12:00:00Z`) - new Date(`${pickupDay}T12:00:00Z`)) / 86400000);
+      if (days < minRentalDays) errors.push(`Minimum rental is ${minRentalDays} day${minRentalDays === 1 ? "" : "s"}.`);
+      if (maxRentalDays > 0 && days > maxRentalDays) errors.push(`Maximum rental is ${maxRentalDays} day${maxRentalDays === 1 ? "" : "s"}.`);
+    }
+    const openFrom = String(listingDetails.pickupTime || "").slice(0, 5);
+    const closeBy = String(listingDetails.returnTime || "").slice(0, 5);
+    const pickupClock = String(raw.pickupDateTime || "").includes("T") ? String(raw.pickupDateTime).slice(11, 16) : splitDateTime(pickupDateTime).time;
+    const returnClock = String(raw.returnDateTime || "").includes("T") ? String(raw.returnDateTime).slice(11, 16) : splitDateTime(returnDateTime).time;
+    if (openFrom && pickupClock && pickupClock < openFrom) errors.push(`Pickup starts from ${openFrom}.`);
+    if (closeBy && returnClock && returnClock > closeBy) errors.push(`Return by ${closeBy}.`);
   }
 
   if (new Date(pickupDateTime).getTime() < Date.now() - 60 * 1000) {

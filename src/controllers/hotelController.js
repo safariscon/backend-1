@@ -57,6 +57,8 @@ const ServiceAvailability = require("../models/ServiceAvailability");
 const AvailabilityBlock = require("../models/AvailabilityBlock");
 const User = require("../models/User");
 const { serializeBlock, remainingForStay, loadStayOccupancy, optionQuantity, isStayLike } = require("../services/occupancyService");
+const { releaseBookingHold } = require("../services/bookingHoldService");
+const { remainingAmountOf, buildVerificationView } = require("../utils/bookingVerification");
 
 const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
 const DEPOSIT_PERCENT = 30;
@@ -124,21 +126,11 @@ const getSellerBusinessIds = async (req) => Hotel.find(sellerBusinessFilter(req)
 
 const normalizeBookingCode = (value) => String(value || "").trim().toUpperCase();
 
-const getRemainingAmount = (booking) => {
-  const finalPrice = Number(booking.priceSnapshot?.finalPrice || booking.totalPrice || 0);
-  return Math.max(0, Math.round(finalPrice - Number(booking.amountPaid || booking.depositAmount || finalPrice)));
-};
+const getRemainingAmount = remainingAmountOf;
 
 const buildCompletionSummary = (booking) => ({
+  ...buildVerificationView(booking),
   bookingId: booking._id,
-  customerName: booking.touristId?.name || booking.bookingDetails?.fullName || "Customer",
-  serviceName: booking.bookingDetails?.requestedService || booking.bookingDetails?.serviceName || booking.destinationPlace,
-  businessName: booking.hotelId?.name || booking.preferredHotelId?.name || "Service",
-  bookingDate: booking.bookingDetails?.bookingDate || booking.checkIn || booking.createdAt,
-  depositAmount: Number(booking.depositAmount || booking.amountPaid || 0),
-  remainingAmount: getRemainingAmount(booking),
-  bookingStatus: booking.status,
-  paymentStatus: booking.paymentStatus,
 });
 
 const sanitizeSellerBooking = (booking) => {
@@ -638,6 +630,11 @@ const updateBookingStatus = async (req, res) => {
         rejectionReason: String(req.body.reason || "Service provider rejected this booking.").trim().slice(0, 1000),
       };
       booking.adminResponseMessage = booking.sellerApproval.rejectionReason;
+      try {
+        await releaseBookingHold(booking);
+      } catch (error) {
+        console.warn("Failed to release nights for rejected booking:", error.message);
+      }
     }
 
     await booking.save();
@@ -693,7 +690,7 @@ const verifyBookingCodeForCompletion = async (req, res) => {
 
     if (!booking) return res.status(404).json({ message: "Booking Code is invalid for your business." });
     if (!DEPOSIT_PAID_STATUSES.includes(booking.paymentStatus) || booking.detailsUnlocked !== true) {
-      return res.status(409).json({ message: "This booking is not eligible. The full amount must be paid first." });
+      return res.status(409).json({ message: "This booking is not eligible until the deposit is paid." });
     }
     if (["cancelled", "rejected", "completed"].includes(booking.status) || booking.completionStatus === "completed") {
       return res.status(409).json({ message: "This booking cannot be completed in its current status." });
@@ -715,7 +712,7 @@ const completeVerifiedBooking = async (req, res) => {
     const bookingId = String(req.body.bookingId || "").trim();
     if (!bookingId || !code) return res.status(400).json({ message: "Booking ID and Booking Code are required." });
     if (req.body.confirmRemainingPaid !== true) {
-      return res.status(400).json({ message: "Confirm that the remaining 70% was paid to the seller." });
+      return res.status(400).json({ message: "Confirm that the remaining amount was collected." });
     }
 
     const businessIds = await getSellerBusinessIds(req);
@@ -1131,19 +1128,10 @@ const upsertMyService = async (req, res) => {
         return res.status(404).json({ message: "Business not found." });
       }
 
-      const criticalChanged =
-        existingBusiness.name !== title ||
-        String(existingBusiness.categoryId || "") !== String(category._id) ||
-        JSON.stringify(existingBusiness.listingAttributes || {}) !== JSON.stringify(listingAttributes) ||
-        Number(existingBusiness.catalogLocation?.latitude) !== Number(catalogLocation.latitude) ||
-        Number(existingBusiness.catalogLocation?.longitude) !== Number(catalogLocation.longitude) ||
-        JSON.stringify(existingBusiness.images || []) !== JSON.stringify(images) ||
-        String(existingBusiness.primaryImage || "") !== String(primaryImage || "");
-
       const nextApproval =
-        existingBusiness.approvalStatus === "approved" && !criticalChanged
+        existingBusiness.approvalStatus === "approved"
           ? "approved"
-          : "pending";
+          : existingBusiness.approvalStatus || "pending";
 
       const existingPromotion = existingBusiness.promotion || {};
       const promotionChanged =
@@ -1408,10 +1396,6 @@ const upsertMyServiceOption = async (req, res) => {
         trackCapacity: true,
       });
     }
-    if (business.approvalStatus === "approved") {
-      business.approvalStatus = "pending";
-      await business.save();
-    }
     clearCache("public:");
     return res.status(req.params.optionId ? 200 : 201).json({
       message: req.params.optionId ? "Option updated." : "Option created.",
@@ -1490,8 +1474,10 @@ const verifyMyBooking = async (req, res) => {
     ].filter(Boolean);
 
     const booking = await Booking.findOne({
-      hotelId: { $in: businessIds },
-      $or: lookupConditions,
+      $and: [
+        { $or: [{ hotelId: { $in: businessIds } }, { preferredHotelId: { $in: businessIds } }] },
+        { $or: lookupConditions },
+      ],
     })
       .populate("touristId", "name email phone role")
       .populate("preferredHotelId", "name location type")
@@ -1499,7 +1485,7 @@ const verifyMyBooking = async (req, res) => {
       .populate("roomId", "roomNumber type price status");
 
     if (!booking) return res.status(404).json({ message: "Booking not found for your business." });
-    return res.json({ booking: sanitizeSellerBooking(booking) });
+    return res.json({ booking: buildVerificationView(booking) });
   } catch (error) {
     return res.status(500).json({ message: "Failed to verify booking.", error: error.message });
   }
@@ -1610,10 +1596,6 @@ const upsertMyServiceAvailability = async (req, res) => {
       await syncServiceOptionsToAvailabilityTable(business._id);
     }
 
-    if (business.approvalStatus === "approved") {
-      business.approvalStatus = "pending";
-      await business.save();
-    }
     clearCache("public:");
 
     return res.json({

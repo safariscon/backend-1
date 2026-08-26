@@ -5,6 +5,20 @@ const DEFAULT_COMMISSION_PERCENT = 10;
 const REMAINING_PAYMENT_METHODS = ["PAY_AT_ARRIVAL", "PAY_AT_CHECKOUT", "PAY_AT_BOOKING"];
 const CANCELLATION_TYPES = ["flexible", "moderate", "strict", "custom"];
 
+const remainingPaymentDuePhrase = (method, listing = {}) => {
+  const code = String(method || "").trim().toUpperCase();
+  const slug = String(listing.categorySlug || listing.subtype || listing.type || "").toLowerCase();
+  const isRental = listing.domain === "transport"
+    || /(car-rental|car-rentals|^cars$|motorbike)/.test(slug);
+  if (code === "PAY_AT_BOOKING") return "when booking";
+  if (isRental) {
+    if (code === "PAY_AT_CHECKOUT") return "at return";
+    return "at pickup";
+  }
+  if (code === "PAY_AT_CHECKOUT") return "at checkout";
+  return "on arrival";
+};
+
 const clampPercent = (value, fallback) => {
   const parsed = asInteger(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -76,4 +90,5 @@ module.exports = {
   normalizeCancellationPolicy,
   splitBookingAmounts,
   policyFromListing,
+  remainingPaymentDuePhrase,
 };

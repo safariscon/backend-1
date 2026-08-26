@@ -22,6 +22,7 @@ const {
   resolveApprovalStatus,
 } = require("../utils/adminServiceView");
 const { listAvailabilitiesForService } = require("../services/availabilityService");
+const { releaseBookingHold } = require("../services/bookingHoldService");
 const mongoose = require("mongoose");
 const {
   REALTIME_EVENTS,
@@ -30,6 +31,7 @@ const {
   emitUserRealtime,
 } = require("../utils/realtime");
 const { clearCache } = require("../utils/cache");
+const { buildVerificationView } = require("../utils/bookingVerification");
 
 const registerBusiness = registerBusinessByAdmin;
 
@@ -614,6 +616,11 @@ const rejectBooking = async (req, res) => {
       { returnDocument: "after", runValidators: true }
     );
     if (!booking) return res.status(409).json({ message: "Only pending bookings can be rejected." });
+    try {
+      await releaseBookingHold(booking);
+    } catch (error) {
+      console.warn("Failed to release nights for rejected booking:", error.message);
+    }
     emitUserRealtime(booking.touristId, REALTIME_EVENTS.BOOKING_CHANGED, {
       action: "rejected",
       bookingId: booking._id,
@@ -1441,7 +1448,7 @@ const verifyBookingByLookup = async (req, res) => {
   try {
     const booking = await findBookingForVerification(req.params.lookup);
     if (!booking) return res.status(404).json({ message: "Booking not found." });
-    return res.json({ booking });
+    return res.json({ booking: buildVerificationView(booking), raw: booking });
   } catch (error) {
     return res.status(500).json({ message: "Failed to verify booking.", error: error.message });
   }

@@ -1,8 +1,30 @@
 const AvailabilityBlock = require("../models/AvailabilityBlock");
+const Booking = require("../models/Booking");
 const BookingConsumption = require("../models/BookingConsumption");
 const { normalizeIsoDate } = require("./availabilityService");
 
 const ACTIVE_CONSUMPTION_STATUSES = ["pending", "paid"];
+const TERMINAL_BOOKING_STATUSES = ["cancelled", "rejected", "expired"];
+
+const consumptionCountsTowardOccupancy = (consumption = {}, booking = null) => {
+  if (!booking) return false;
+  const bookingStatus = String(booking.status || "").toLowerCase();
+  if (TERMINAL_BOOKING_STATUSES.includes(bookingStatus)) return false;
+  return ACTIVE_CONSUMPTION_STATUSES.includes(String(consumption.status || "").toLowerCase());
+};
+
+const consumptionsHeldByLiveBookings = async (consumptions = []) => {
+  const ids = [...new Set((consumptions || []).map((row) => row.bookingId).filter(Boolean))];
+  if (!ids.length) return [];
+  const live = await Booking.find({
+    _id: { $in: ids },
+    status: { $nin: TERMINAL_BOOKING_STATUSES },
+  })
+    .select("_id")
+    .lean();
+  const liveIds = new Set(live.map((row) => String(row._id)));
+  return (consumptions || []).filter((row) => liveIds.has(String(row.bookingId)));
+};
 
 const addDays = (iso, days) => {
   const date = new Date(`${iso}T12:00:00.000Z`);
@@ -30,8 +52,14 @@ const optionQuantity = (option = {}) =>
 const isStayLike = ({ listing = {}, option = {}, domain } = {}) => {
   if (domain === "accommodation") return true;
   if (listing.domain === "accommodation") return true;
-  const slug = String(listing.categorySlug || listing.type || "").toLowerCase();
+  const slug = String(listing.categorySlug || listing.type || listing.subtype || "").toLowerCase();
   if (/(hotel|apartment|homestay|guest-house|hostel|villa|lodge)/.test(slug)) return true;
+  if (domain === "transport" || listing.domain === "transport") {
+    if (/(car-rental|car-rentals|^cars$|motorbike)/.test(slug)) return true;
+  }
+  if (/(car-rental|car-rentals)/.test(slug) || slug === "motorbike" || slug === "motorbike-and-scooter-rentals") {
+    return true;
+  }
   const unit = String(option.durationUnit || "").toLowerCase();
   const priceType = String(option.priceType || "").toLowerCase();
   return unit === "nights" || priceType === "per-night";
@@ -92,7 +120,7 @@ const loadStayOccupancy = async ({ serviceId, optionId = null }) => {
       ...filter,
       status: { $in: ACTIVE_CONSUMPTION_STATUSES },
     })
-      .select("serviceId optionId consumptionStartDate consumptionEndDate units status")
+      .select("bookingId serviceId optionId consumptionStartDate consumptionEndDate units status")
       .lean(),
     AvailabilityBlock.find({
       ...filter,
@@ -101,7 +129,7 @@ const loadStayOccupancy = async ({ serviceId, optionId = null }) => {
       .select("serviceId optionId startDate endDate units note source")
       .lean(),
   ]);
-  return { consumptions, blocks };
+  return { consumptions: await consumptionsHeldByLiveBookings(consumptions), blocks };
 };
 
 const loadStayOccupancyForServices = async (serviceIds = []) => {
@@ -112,7 +140,7 @@ const loadStayOccupancyForServices = async (serviceIds = []) => {
       serviceId: { $in: ids },
       status: { $in: ACTIVE_CONSUMPTION_STATUSES },
     })
-      .select("serviceId optionId consumptionStartDate consumptionEndDate units status")
+      .select("bookingId serviceId optionId consumptionStartDate consumptionEndDate units status")
       .lean(),
     AvailabilityBlock.find({
       serviceId: { $in: ids },
@@ -123,7 +151,8 @@ const loadStayOccupancyForServices = async (serviceIds = []) => {
   ]);
   const consumptionsByOption = new Map();
   const blocksByOption = new Map();
-  (consumptions || []).forEach((row) => {
+  const liveConsumptions = await consumptionsHeldByLiveBookings(consumptions);
+  liveConsumptions.forEach((row) => {
     const key = occupancyKey(row.serviceId, row.optionId);
     if (!consumptionsByOption.has(key)) consumptionsByOption.set(key, []);
     consumptionsByOption.get(key).push(row);
@@ -199,6 +228,8 @@ const serializeBlock = (doc) => {
 
 module.exports = {
   ACTIVE_CONSUMPTION_STATUSES,
+  TERMINAL_BOOKING_STATUSES,
+  consumptionCountsTowardOccupancy,
   addDays,
   eachNight,
   occupancyKey,

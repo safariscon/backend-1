@@ -20,6 +20,7 @@ const {
   validateBookingDetails,
   splitBookingAmounts,
   policyFromListing,
+  remainingPaymentDuePhrase,
   calculateStayQuote,
 } = require("../domains");
 const CategoryBookingDetail = require("../models/CategoryBookingDetail");
@@ -36,6 +37,12 @@ const {
   markConsumptionPaidAndCaptureCapacity,
 } = require("../services/availabilityService");
 const { evaluateStayAvailability, isStayLike } = require("../services/occupancyService");
+const {
+  releaseBookingHold,
+  expireUnpaidBookingHold,
+  shouldExpireUnpaidHold,
+  runUnpaidBookingHoldCleanup,
+} = require("../services/bookingHoldService");
 const {
   startCollection,
   refreshCollection,
@@ -398,6 +405,11 @@ const applyCustomerCancellation = async ({ booking, reason, now = new Date() }) 
     platformCancelAmount: split.platformAmount,
     providerCancelAmount: split.providerAmount,
   };
+  try {
+    await releaseBookingHold(booking);
+  } catch (error) {
+    console.warn("Failed to release nights for cancelled booking:", error.message);
+  }
   const saved = await booking.save();
 
   const transaction = await findLatestTransaction(booking._id);
@@ -1138,7 +1150,7 @@ const createBookingRequest = async (req, res) => {
       originalBookingId: rebookClaim?.originalBookingId || null,
       rebookRequestId: rebookClaim?.requestId || null,
       adminResponseMessage: automaticQuote
-        ? `Your automatic quote is ready. Pay the ${money.depositPercentage}% deposit of RWF ${money.depositAmount.toLocaleString("en-US")} now. The remaining RWF ${money.remainingAmount.toLocaleString("en-US")} is due ${listingPolicies.payment.remainingPaymentMethod === "PAY_AT_CHECKOUT" ? "at checkout" : "on arrival"}.`
+        ? `Your automatic quote is ready. Pay the ${money.depositPercentage}% deposit of RWF ${money.depositAmount.toLocaleString("en-US")} now. The remaining RWF ${money.remainingAmount.toLocaleString("en-US")} is due ${remainingPaymentDuePhrase(listingPolicies.payment.remainingPaymentMethod, selectedBusiness)}.`
         : selectedBusiness
           ? "Your request has been submitted successfully. Please wait for service provider approval."
           : "Your request has been submitted successfully. Please wait for admin response.",
@@ -1255,7 +1267,9 @@ const createBookingRequest = async (req, res) => {
     if (createdBooking && rebookFinalized) {
       return res.status(201).json({ message: "Re-booking created successfully.", booking: createdBooking });
     }
-    if (reservedBusiness && reservedOptionId && reservedQuantity) {
+    if (createdBooking) {
+      await releaseBookingHold(createdBooking).catch(() => {});
+    } else if (reservedBusiness && reservedOptionId && reservedQuantity) {
       await Hotel.updateOne(
         { _id: reservedBusiness },
         { $inc: { "availabilityTable.rows.$[option].cells.availability": reservedQuantity } },
@@ -1519,13 +1533,9 @@ const loadPayableBooking = async (req) => {
     booking.paymentDeadlineAt &&
     new Date(booking.paymentDeadlineAt) <= new Date()
   ) {
-    booking.status = "cancelled";
-    booking.paymentStatus = "failed";
-    booking.sellerApproval = {
-      ...(booking.sellerApproval || {}),
-      status: "expired",
-    };
-    await booking.save();
+    await expireUnpaidBookingHold(booking, {
+      reason: "The payment deadline for this approved booking has expired.",
+    });
     const error = new Error("The payment deadline for this approved booking has expired.");
     error.status = 409;
     throw error;
@@ -1536,15 +1546,9 @@ const loadPayableBooking = async (req) => {
     booking.availabilityReservation?.expiresAt &&
     new Date(booking.availabilityReservation.expiresAt) <= new Date()
   ) {
-    await Hotel.updateOne(
-      { _id: booking.hotelId || booking.preferredHotelId },
-      { $inc: { "availabilityTable.rows.$[option].cells.availability": Number(booking.availabilityReservation.quantity || 0) } },
-      { arrayFilters: [{ "option.id": booking.serviceOptionId }] }
-    );
-    booking.availabilityReservation.status = "expired";
-    booking.status = "cancelled";
-    booking.paymentStatus = "failed";
-    await booking.save();
+    await expireUnpaidBookingHold(booking, {
+      reason: "This automatic quote expired and its availability was released. Please make a new booking.",
+    });
     const error = new Error("This automatic quote expired and its availability was released. Please make a new booking.");
     error.status = 409;
     throw error;
@@ -1764,6 +1768,11 @@ const syncBookingPayment = async (req, res) => {
     }
     if (transaction.status === "paid") return alreadyPaidResponse(res, booking);
     if (transaction.status === "failed") {
+      booking.paymentStatus = "failed";
+      await booking.save();
+      if (shouldExpireUnpaidHold(booking)) {
+        await expireUnpaidBookingHold(booking);
+      }
       const momo = momoApprovalHint(transaction);
       return res.status(402).json({
         code: "PAYMENT_FAILED",
@@ -1801,6 +1810,9 @@ const syncBookingPayment = async (req, res) => {
     if (status === "FAILED") {
       booking.paymentStatus = "failed";
       await booking.save();
+      if (shouldExpireUnpaidHold(booking)) {
+        await expireUnpaidBookingHold(booking);
+      }
       return res.status(402).json({
         code: "PAYMENT_FAILED",
         message: `No confirmation was received on ${momo.phone || "the Mobile Money phone"}. If no popup appeared, dial ${momo.ussd} and check Pending, then tap Pay again to send a new request.`,
@@ -2135,6 +2147,7 @@ module.exports = {
   runBookingNoActionRefundCleanup,
   runReleasedProviderPayouts,
   runPendingPaymentSync,
+  runUnpaidBookingHoldCleanup,
   calculateDepositAmount,
   calculateRefundAmount,
   hasDepositPaid,
