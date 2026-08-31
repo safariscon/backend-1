@@ -148,8 +148,10 @@ const hotelSchema = new mongoose.Schema(
       city: { type: String, default: "", trim: true },
       area: { type: String, default: "", trim: true },
       placeName: { type: String, default: "", trim: true },
+      referenceName: { type: String, default: "", trim: true },
       placeId: { type: String, default: "", trim: true },
       locationSource: { type: String, default: "search", trim: true },
+      isExactLocationVerified: { type: Boolean, default: false },
       geo: {
         type: { type: String, enum: ["Point"] },
         coordinates: { type: [Number] },

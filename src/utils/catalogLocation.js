@@ -60,8 +60,13 @@ const normalizeCatalogLocation = (input = {}) => {
       city,
       area,
       placeName: String(input.placeName || input.name || "").trim(),
+      referenceName: String(input.referenceName || input.landmark || "").trim(),
       placeId: String(input.placeId || "").trim(),
       locationSource: String(input.locationSource || "search").trim() || "search",
+      isExactLocationVerified:
+        input.isExactLocationVerified === undefined || input.isExactLocationVerified === null
+          ? true
+          : Boolean(input.isExactLocationVerified),
     }),
   };
 };

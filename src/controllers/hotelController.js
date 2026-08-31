@@ -933,8 +933,10 @@ const upsertMyService = async (req, res) => {
             city: serviceLocation.district || "",
             area: serviceLocation.sector || "",
             placeName: serviceLocation.name || "",
+            referenceName: req.body.serviceLocation?.referenceName || "",
             placeId: serviceLocation.placeId || "",
             locationSource: serviceLocation.locationSource || "map_click",
+            isExactLocationVerified: Boolean(serviceLocation.isExactLocationVerified),
           }
     );
 
