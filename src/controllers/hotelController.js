@@ -61,7 +61,7 @@ const { releaseBookingHold } = require("../services/bookingHoldService");
 const { remainingAmountOf, buildVerificationView } = require("../utils/bookingVerification");
 
 const DEPOSIT_PAID_STATUSES = ["deposit_paid", "deposit-paid", "paid"];
-const DEPOSIT_PERCENT = 30;
+const { resolveBookingMoney } = require("../domains/shared/policies");
 
 const publicFrontendUrl = () =>
   String(process.env.PUBLIC_FRONTEND_URL || process.env.FRONTEND_URL || "https://safariscon.eserveconn.com").replace(/\/+$/, "");
@@ -92,7 +92,7 @@ const withCommissionTerms = (business) => {
       : {
           percentage,
           label: `${percentage}% platform commission`,
-          description: "SafarisCon takes this commission from the full paid booking after the cancellation window closes. If the customer cancels in time, commission is half that rate on the cancellation fee only.",
+          description: "10% of the full listing price, deducted from the customer's online deposit.",
         },
     cancellationTerms: {
       windowHours: cancelPolicy.windowHours,
@@ -577,21 +577,23 @@ const updateBookingStatus = async (req, res) => {
       }
 
       const total = Math.round(quotedTotal);
-      const depositAmount = Math.round((total * DEPOSIT_PERCENT) / 100);
       const commissionPercentage = Math.max(0, Math.min(100, Number(business.commissionPercentage ?? 5)));
+      const money = resolveBookingMoney(business, { totalPrice: total, commissionPercentage });
       const deadlineAt = new Date(Date.now() + deadlineHours * 3600000);
 
       booking.hotelId = business._id;
       booking.preferredHotelId = booking.preferredHotelId || business._id;
       booking.supplierId = business.supplierId || null;
       booking.status = "confirmed";
-      booking.totalPrice = total;
-      booking.depositPercentage = DEPOSIT_PERCENT;
-      booking.depositPercent = DEPOSIT_PERCENT;
-      booking.depositAmount = depositAmount;
-      booking.remainingBalance = Math.max(0, total - depositAmount);
+      booking.totalPrice = money.totalAmount;
+      booking.depositPercentage = money.depositPercentage;
+      booking.depositPercent = money.depositPercentage;
+      booking.depositAmount = money.depositAmount;
+      booking.remainingBalance = money.remainingAmount;
+      booking.remainingAmount = money.remainingAmount;
+      booking.remainingPaymentMethod = money.remainingPaymentMethod;
       booking.commissionPercentage = commissionPercentage;
-      booking.commissionAmount = Math.round((total * commissionPercentage) / 100);
+      booking.commissionAmount = money.platformFee;
       booking.paymentDeadlineAt = deadlineAt;
       booking.paymentReason = paymentReason;
       booking.isConnected = true;

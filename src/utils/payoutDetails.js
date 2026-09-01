@@ -25,6 +25,46 @@ const toInternationalMsisdn = (value) => {
   return digits;
 };
 
+const normalizePayoutAccountName = (value) =>
+  String(value || "")
+    .normalize("NFC")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const parseXentripayRegisteredName = (message) => {
+  const text = String(message || "");
+  const match = text.match(/correct registered name is\s*:?\s*(.+)$/i);
+  return match ? normalizePayoutAccountName(match[1]) : "";
+};
+
+const resolvePayoutRecipientName = (details = {}) => {
+  const verified = normalizePayoutAccountName(details.verifiedAccountName);
+  if (details.verified && verified) return verified;
+  return normalizePayoutAccountName(details.accountName);
+};
+
+const formatPayoutMsisdnForGateway = (value) => {
+  const local = toLocalMsisdn(value);
+  if (LOCAL_PHONE_REGEX.test(local)) return local;
+  const international = toInternationalMsisdn(value);
+  if (/^250\d{9}$/.test(international)) return international;
+  return String(value || "").trim();
+};
+
+const payoutMsisdnCandidatesForXentripay = (value) => {
+  const local = toLocalMsisdn(value);
+  const international = toInternationalMsisdn(value);
+  const candidates = [];
+  if (LOCAL_PHONE_REGEX.test(local)) candidates.push(local);
+  if (/^250\d{9}$/.test(international)) {
+    candidates.push(international);
+    candidates.push(`+${international}`);
+  }
+  const trimmed = String(value || "").trim();
+  if (trimmed) candidates.push(trimmed);
+  return [...new Set(candidates)];
+};
+
 const payoutDetailsSchema = () => ({
   method: { type: String, default: "", trim: true },
   providerId: { type: String, default: "", trim: true },
@@ -51,6 +91,19 @@ const emptyPayoutDetails = () => ({
   verifiedAt: null,
 });
 
+const formatPayoutFailureMessage = (error, { recipientName = "", msisdn = "" } = {}) => {
+  const message = String(error?.message || "Provider payout failed.");
+  const registeredName = parseXentripayRegisteredName(message);
+  if (registeredName) {
+    return `MoMo account name must match the wallet exactly. XentriPay expects: ${registeredName}. The provider payout account was updated to that name — click Pay again.`;
+  }
+  if (/invalid fsp account/i.test(message)) {
+    const phone = msisdn || "the MoMo number";
+    return `XentriPay returned: ${message}. This usually means the phone format or FSP provider ID does not match what the payout API expects (not necessarily the account name). Sent to ${phone}${recipientName ? ` for ${recipientName}` : ""}. Confirm test/live API keys match your XentriPay dashboard.`;
+  }
+  return message;
+};
+
 const hasCompletePayoutDetails = (details = {}) =>
   Boolean(details.method && details.providerId && details.accountName && (details.accountNumber || details.msisdn));
 
@@ -58,7 +111,7 @@ const normalizePayoutDetails = (input = {}, { required = true } = {}) => {
   const raw = input && typeof input === "object" ? input : {};
   const method = normalizePayoutMethod(raw.method || raw.payoutMethod || "");
   const providerId = String(raw.providerId || raw.telecomProviderId || "").trim();
-  const accountName = String(raw.accountName || raw.name || "").trim();
+  const accountName = normalizePayoutAccountName(raw.accountName || raw.name || "");
   const accountNumber = String(raw.accountNumber || raw.msisdn || raw.phone || "").trim();
   const instructions = String(raw.instructions || "").trim();
 
@@ -203,6 +256,12 @@ module.exports = {
   digitsOnly,
   toLocalMsisdn,
   toInternationalMsisdn,
+  normalizePayoutAccountName,
+  parseXentripayRegisteredName,
+  resolvePayoutRecipientName,
+  formatPayoutMsisdnForGateway,
+  payoutMsisdnCandidatesForXentripay,
+  formatPayoutFailureMessage,
   payoutDetailsSchema,
   emptyPayoutDetails,
   hasCompletePayoutDetails,

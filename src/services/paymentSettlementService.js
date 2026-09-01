@@ -1,7 +1,17 @@
 const Transaction = require("../models/Transaction");
+const Booking = require("../models/Booking");
+const Hotel = require("../models/Hotel");
 const { prefixedCode } = require("../utils/secureIds");
-const { hasCompletePayoutDetails } = require("../utils/payoutDetails");
+const {
+  hasCompletePayoutDetails,
+  parseXentripayRegisteredName,
+  resolvePayoutRecipientName,
+  normalizePayoutAccountName,
+  formatPayoutMsisdnForGateway,
+  formatPayoutFailureMessage,
+} = require("../utils/payoutDetails");
 const { resolveCommissionPercentage, splitCollectedAmount } = require("../utils/commission");
+const { notifyProviderPayoutOutcome, payoutBreakdown } = require("./payoutNotificationService");
 const {
   getXentripayConfig,
   initiateCollection,
@@ -22,7 +32,32 @@ const buildSplit = (collectedAmount, business, booking) => {
     Number.isFinite(Number(booking?.commissionPercentage)) && Number(booking.commissionPercentage) > 0
       ? Number(booking.commissionPercentage)
       : resolveCommissionPercentage(business);
-  return splitCollectedAmount(collectedAmount, percentage);
+  return splitCollectedAmount(collectedAmount, percentage, booking?.totalPrice);
+};
+
+const canReconcileSplit = (transaction, booking) => {
+  if (!transaction || transaction.status !== "paid") return false;
+  if (booking?.status === "cancelled") return false;
+  if (transaction.payoutStatus === "successful") return false;
+  if (transaction.payoutStatus === "pending" && transaction.payoutReference) return false;
+  return true;
+};
+
+const reconcileTransactionSplit = async (transaction, booking, business) => {
+  if (!canReconcileSplit(transaction, booking)) return transaction;
+  const split = buildSplit(transaction.amount, business, booking);
+  const changed =
+    Number(transaction.platformAmount) !== split.platformAmount
+    || Number(transaction.providerAmount) !== split.providerAmount
+    || Number(transaction.commissionPercentage) !== split.commissionPercentage;
+  if (!changed) return transaction;
+  transaction.platformAmount = split.platformAmount;
+  transaction.commissionAmount = split.platformAmount;
+  transaction.providerAmount = split.providerAmount;
+  transaction.sellerEarnings = split.providerAmount;
+  transaction.commissionPercentage = split.commissionPercentage;
+  if (typeof transaction.save === "function") await transaction.save();
+  return transaction;
 };
 
 const startCollection = async ({
@@ -136,8 +171,53 @@ const refreshCollection = async (transaction) => {
   return { transaction, status, result };
 };
 
-const startProviderPayout = async (transaction, business) => {
-  const payoutDetails = business?.payoutDetails || {};
+const loadBusinessForPayout = async (business) => {
+  const businessId = business?._id || business;
+  if (!businessId) return null;
+  return Hotel.findById(businessId).select("name payoutDetails ownerUserId ownerEmail");
+};
+
+const applyGatewayRegisteredName = async (businessId, registeredName) => {
+  if (!businessId || !registeredName) return null;
+  return Hotel.findByIdAndUpdate(
+    businessId,
+    {
+      $set: {
+        "payoutDetails.accountName": registeredName,
+        "payoutDetails.verified": true,
+        "payoutDetails.verifiedAccountName": registeredName,
+        "payoutDetails.verifiedAt": new Date(),
+      },
+    },
+    { returnDocument: "after" }
+  ).select("name payoutDetails");
+};
+
+const submitProviderPayoutAttempt = async ({ payoutDetails, providerAmount, recipientName }) => {
+  const customerReference = prefixedCode("PO", 12);
+  const msisdn = payoutDetails.msisdn || payoutDetails.accountNumber;
+  const payout = await initiatePayout({
+    customerReference,
+    telecomProviderId: payoutDetails.providerId,
+    msisdn,
+    name: recipientName,
+    amount: providerAmount,
+  });
+  return {
+    payout,
+    customerReference,
+    recipientName,
+    msisdn: formatPayoutMsisdnForGateway(msisdn),
+  };
+};
+
+const startProviderPayout = async (transaction, business, booking) => {
+  if (booking) {
+    await reconcileTransactionSplit(transaction, booking, business);
+  }
+
+  const businessDoc = (await loadBusinessForPayout(business)) || business;
+  const payoutDetails = businessDoc?.payoutDetails || {};
   if (!hasCompletePayoutDetails(payoutDetails)) {
     transaction.payoutStatus = "failed";
     transaction.payoutMessage = "Service provider payout details are missing.";
@@ -157,15 +237,68 @@ const startProviderPayout = async (transaction, business) => {
     return transaction;
   }
 
-  const customerReference = prefixedCode("PO", 12);
-  const payout = await initiatePayout({
-    customerReference,
-    telecomProviderId: payoutDetails.providerId,
-    msisdn: payoutDetails.msisdn || payoutDetails.accountNumber,
-    name: payoutDetails.accountName,
-    amount: providerAmount,
-  });
+  if (transaction.payoutStatus === "failed") {
+    transaction.payoutReference = "";
+    transaction.payoutInternalRef = "";
+  }
 
+  const businessId = businessDoc?._id || businessDoc;
+  let recipientName = resolvePayoutRecipientName(payoutDetails);
+  const attempts = [];
+
+  const runAttempt = async (label) => {
+    try {
+      const result = await submitProviderPayoutAttempt({
+        payoutDetails,
+        providerAmount,
+        recipientName,
+      });
+      attempts.push({ label, ok: true, recipientName: result.recipientName, msisdn: result.msisdn });
+      return { ok: true, ...result };
+    } catch (error) {
+      const registeredName = parseXentripayRegisteredName(error.message);
+      attempts.push({
+        label,
+        ok: false,
+        recipientName,
+        msisdn: formatPayoutMsisdnForGateway(payoutDetails.msisdn || payoutDetails.accountNumber),
+        message: error.message,
+        registeredName,
+      });
+      return { ok: false, error, registeredName };
+    }
+  };
+
+  let attempt = await runAttempt("initial");
+  if (!attempt.ok && attempt.registeredName) {
+    await applyGatewayRegisteredName(businessId, attempt.registeredName);
+    recipientName = attempt.registeredName;
+    payoutDetails.accountName = attempt.registeredName;
+    payoutDetails.verifiedAccountName = attempt.registeredName;
+    payoutDetails.verified = true;
+    attempt = await runAttempt("gateway-name-retry");
+  }
+
+  transaction.gatewayRaw = {
+    ...(transaction.gatewayRaw || {}),
+    payoutAttempts: attempts,
+  };
+
+  if (!attempt.ok) {
+    transaction.payoutStatus = "failed";
+    transaction.payoutMessage = formatPayoutFailureMessage(attempt.error, {
+      recipientName,
+      msisdn: formatPayoutMsisdnForGateway(payoutDetails.msisdn || payoutDetails.accountNumber),
+    });
+    transaction.gatewayRaw = {
+      ...transaction.gatewayRaw,
+      payoutError: attempt.error?.payload || { message: attempt.error?.message },
+    };
+    await transaction.save();
+    return transaction;
+  }
+
+  const { payout, customerReference } = attempt;
   transaction.payoutReference = customerReference;
   transaction.payoutInternalRef = payout.internalRef || "";
   transaction.payoutStatus = normalizePayoutStatus(payout.status);
@@ -174,13 +307,11 @@ const startProviderPayout = async (transaction, business) => {
     "Payout submitted. The SafarisCon merchant must confirm the XentriPay OTP before funds are released.";
   transaction.payoutProviderId = payoutDetails.providerId;
   transaction.payoutAccount = payoutDetails.msisdn || payoutDetails.accountNumber;
-  transaction.verifiedAccountName = payout.validatedAccountName || "";
+  transaction.verifiedAccountName = payout.validatedAccountName || recipientName || "";
   transaction.gatewayRaw = { ...(transaction.gatewayRaw || {}), payout };
-  if (payout.validatedAccountName && business.payoutDetails) {
-    business.payoutDetails.verified = true;
-    business.payoutDetails.verifiedAccountName = payout.validatedAccountName;
-    business.payoutDetails.verifiedAt = new Date();
-    if (typeof business.save === "function") await business.save();
+  if ((payout.validatedAccountName || recipientName) && businessDoc?.payoutDetails && businessId) {
+    const validatedName = normalizePayoutAccountName(payout.validatedAccountName || recipientName);
+    await applyGatewayRegisteredName(businessId, validatedName);
   }
   await transaction.save();
   return transaction;
@@ -299,6 +430,159 @@ const syncPendingCollections = async ({ limit = 25 } = {}) => {
   return summary;
 };
 
+const DEPOSIT_PAID_STATUSES = ["paid", "deposit_paid", "deposit-paid"];
+
+const processEligibleProviderPayouts = async ({ now = new Date(), limit = 50 } = {}) => {
+  const summary = { checked: 0, paidOut: 0, skipped: 0, failed: 0, errors: [] };
+  const bookings = await Booking.find({
+    paymentStatus: { $in: DEPOSIT_PAID_STATUSES },
+    status: { $nin: ["cancelled", "completed", "rejected"] },
+    "cancellation.refundableUntil": { $lte: now },
+  }).limit(limit);
+
+  for (const booking of bookings) {
+    summary.checked += 1;
+    const transaction = await findLatestTransaction(booking._id);
+    if (!transaction || transaction.status !== "paid") {
+      summary.skipped += 1;
+      continue;
+    }
+    if (!["held", "none", "failed"].includes(transaction.payoutStatus)) {
+      summary.skipped += 1;
+      continue;
+    }
+    const businessId = booking.hotelId || booking.preferredHotelId;
+    const business = businessId ? await Hotel.findById(businessId) : null;
+    try {
+      const updated = await startProviderPayout(transaction, business, booking);
+      const outcome = updated.payoutStatus === "failed" ? "failed" : "submitted";
+      await notifyProviderPayoutOutcome({ transaction: updated, business, outcome });
+      if (updated.payoutStatus === "failed") summary.failed += 1;
+      else summary.paidOut += 1;
+    } catch (error) {
+      summary.failed += 1;
+      summary.errors.push(error.message);
+    }
+  }
+  return summary;
+};
+
+const processHeldProviderPayouts = async ({ limit = 100 } = {}) => {
+  const summary = { checked: 0, paidOut: 0, skipped: 0, failed: 0, errors: [] };
+  const transactions = await Transaction.find({
+    status: "paid",
+    payoutStatus: { $in: ["held", "none", "failed"] },
+  })
+    .sort({ createdAt: 1 })
+    .limit(limit);
+
+  for (const transaction of transactions) {
+    summary.checked += 1;
+    const booking = transaction.bookingId
+      ? await Booking.findById(transaction.bookingId)
+      : null;
+    if (booking?.status === "cancelled") {
+      summary.skipped += 1;
+      continue;
+    }
+    const businessId =
+      transaction.businessId
+      || booking?.hotelId
+      || booking?.preferredHotelId;
+    const business = businessId ? await Hotel.findById(businessId) : null;
+    try {
+      const updated = await startProviderPayout(transaction, business, booking);
+      const outcome = updated.payoutStatus === "failed" ? "failed" : "submitted";
+      await notifyProviderPayoutOutcome({ transaction: updated, business, outcome });
+      if (updated.payoutStatus === "failed") summary.failed += 1;
+      else summary.paidOut += 1;
+    } catch (error) {
+      summary.failed += 1;
+      summary.errors.push(error.message);
+    }
+  }
+  return summary;
+};
+
+const syncPendingPayouts = async ({ limit = 25 } = {}) => {
+  const pending = await Transaction.find({
+    status: "paid",
+    payoutStatus: "pending",
+    payoutReference: { $exists: true, $ne: "" },
+  })
+    .sort({ updatedAt: 1 })
+    .limit(limit);
+
+  const summary = { checked: pending.length, successful: 0, failed: 0, stillPending: 0 };
+  for (const transaction of pending) {
+    try {
+      const previous = transaction.payoutStatus;
+      const updated = await refreshPayout(transaction);
+      const business = updated.businessId ? await Hotel.findById(updated.businessId) : null;
+      if (updated.payoutStatus === "successful" && previous !== "successful") {
+        summary.successful += 1;
+        await notifyProviderPayoutOutcome({ transaction: updated, business, outcome: "successful" });
+      } else if (updated.payoutStatus === "failed" && previous !== "failed") {
+        summary.failed += 1;
+        await notifyProviderPayoutOutcome({ transaction: updated, business, outcome: "failed" });
+      } else {
+        summary.stillPending += 1;
+      }
+    } catch (_error) {
+      summary.stillPending += 1;
+    }
+  }
+  return summary;
+};
+
+const triggerProviderPayoutForTransaction = async (transaction, { force = false, now = new Date() } = {}) => {
+  if (!transaction || transaction.status !== "paid") {
+    const error = new Error("Only paid bookings can trigger a provider payout.");
+    error.status = 400;
+    throw error;
+  }
+  if (!["held", "none", "failed"].includes(transaction.payoutStatus)) {
+    const error = new Error(`Payout is already ${transaction.payoutStatus}.`);
+    error.status = 409;
+    throw error;
+  }
+
+  let booking = transaction.bookingId;
+  if (booking && typeof booking === "object" && !booking.cancellation) {
+    booking = await Booking.findById(booking._id || booking);
+  } else if (!booking && transaction.bookingId) {
+    booking = await Booking.findById(transaction.bookingId);
+  }
+
+  if (
+    !force
+    && booking?.cancellation?.refundableUntil
+    && new Date(booking.cancellation.refundableUntil) > now
+  ) {
+    const error = new Error(
+      "Free cancellation is still open. Provider payout is not due until the cancellation window closes."
+    );
+    error.status = 409;
+    error.refundableUntil = booking.cancellation.refundableUntil;
+    throw error;
+  }
+
+  let business = transaction.businessId;
+  if (!business?.payoutDetails) {
+    const businessId =
+      transaction.businessId?._id
+      || transaction.businessId
+      || booking?.hotelId
+      || booking?.preferredHotelId;
+    business = businessId ? await Hotel.findById(businessId) : null;
+  }
+
+  const updated = await startProviderPayout(transaction, business, booking);
+  const outcome = updated.payoutStatus === "failed" ? "failed" : "submitted";
+  await notifyProviderPayoutOutcome({ transaction: updated, business, outcome });
+  return { transaction: updated, breakdown: payoutBreakdown(updated) };
+};
+
 module.exports = {
   buildSplit,
   startCollection,
@@ -311,4 +595,10 @@ module.exports = {
   isReusablePendingCollection,
   abandonStaleCollection,
   syncPendingCollections,
+  processEligibleProviderPayouts,
+  processHeldProviderPayouts,
+  syncPendingPayouts,
+  reconcileTransactionSplit,
+  triggerProviderPayoutForTransaction,
+  payoutBreakdown,
 };

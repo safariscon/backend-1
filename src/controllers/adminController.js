@@ -31,7 +31,7 @@ const {
   emitUserRealtime,
 } = require("../utils/realtime");
 const { clearCache } = require("../utils/cache");
-const { buildVerificationView } = require("../utils/bookingVerification");
+const { resolveBookingMoney } = require("../domains/shared/policies");
 
 const registerBusiness = registerBusinessByAdmin;
 
@@ -554,12 +554,17 @@ const approveBooking = async (req, res) => {
     booking.supplierId = business.supplierId || null;
     booking.quantity = quantity;
     const commissionPercentage = Math.max(0, Math.min(100, Number(req.body.commissionPercentage ?? business.commissionPercentage ?? 10)));
-    const depositPercentage = 30;
-    booking.totalPrice = Math.round(quotedTotal);
-    booking.depositPercentage = depositPercentage;
-    booking.depositPercent = depositPercentage;
-    booking.depositAmount = Math.round((booking.totalPrice * depositPercentage) / 100);
-    booking.remainingBalance = Math.max(0, booking.totalPrice - booking.depositAmount);
+    const money = resolveBookingMoney(business, {
+      totalPrice: Math.round(quotedTotal),
+      commissionPercentage,
+    });
+    booking.totalPrice = money.totalAmount;
+    booking.depositPercentage = money.depositPercentage;
+    booking.depositPercent = money.depositPercentage;
+    booking.depositAmount = money.depositAmount;
+    booking.remainingBalance = money.remainingAmount;
+    booking.remainingAmount = money.remainingAmount;
+    booking.remainingPaymentMethod = money.remainingPaymentMethod;
     booking.detailsUnlocked = false;
     booking.depositPaid = false;
     booking.locationUnlocked = false;
@@ -572,7 +577,7 @@ const approveBooking = async (req, res) => {
     booking.isConnected = true;
     booking.isAcknowledgedByAdmin = true;
     booking.acknowledgedAt = new Date();
-    booking.adminResponseMessage = `Booking approved and assigned to ${business.name}. Payment purpose: ${paymentReason}`;
+    booking.adminResponseMessage = `Booking approved and assigned to ${business.name}. Pay ${money.depositPercentage}% online now (${money.depositAmount.toLocaleString("en-US")} RWF). Remaining ${money.remainingAmount.toLocaleString("en-US")} RWF is due per the listing payment policy.`;
     if (!booking.bookingCode) booking.bookingCode = prefixedCode("SCN", 10);
     if (!booking.verificationCode) booking.verificationCode = prefixedCode("VERIFY", 10);
     if (!booking.verificationToken) {
@@ -644,7 +649,7 @@ const updateMarketplaceSettings = async (req, res) => {
       : "manual";
     const setting = await SiteSetting.findOneAndUpdate(
       { key: "marketplace-settings" },
-      { $set: { value: { depositPercentage: 30, defaultCommissionPercentage, bookingMode, bookingRules } } },
+      { $set: { value: { defaultCommissionPercentage, bookingMode, bookingRules } } },
       { upsert: true, returnDocument: "after", runValidators: true }
     );
     clearCache("public:");
@@ -707,7 +712,7 @@ const updateServiceBookingMode = async (req, res) => {
     if (!business) return res.status(404).json({ message: "Service not found." });
     await SiteSetting.findOneAndUpdate(
       { key: "marketplace-settings" },
-      { $set: { "value.bookingMode": "service-level" }, $setOnInsert: { "value.depositPercentage": 30, "value.defaultCommissionPercentage": 5, "value.bookingRules": [] } },
+      { $set: { "value.bookingMode": "service-level" }, $setOnInsert: { "value.defaultCommissionPercentage": 5, "value.bookingRules": [] } },
       { upsert: true, returnDocument: "after" }
     );
     if (AuditLog.db.readyState === 1) await AuditLog.create({ action: "admin-changed-service-booking-mode", actorId: req.user._id, actorRole: req.user.role, businessId: business._id, metadata: { bookingMode, legacyRulesCompleted: Boolean(automaticTable) } });
@@ -733,7 +738,7 @@ const listTransactions = async (req, res) => {
 
     const [transactions, total, summaryRows, dailyRows, hourlyRows] = await Promise.all([
       Transaction.find(filter)
-      .populate("bookingId", "_id status paymentStatus totalPrice commissionPercentage commissionAmount createdAt")
+      .populate("bookingId", "_id bookingCode status paymentStatus totalPrice commissionPercentage commissionAmount createdAt")
       .populate("userId", "name email")
       .populate("sellerId", "name email sellerId")
       .populate("businessId", "name type payoutDetails commissionPercentage")

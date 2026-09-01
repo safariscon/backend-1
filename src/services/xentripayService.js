@@ -1,4 +1,9 @@
 const { prefixedCode } = require("../utils/secureIds");
+const {
+  normalizePayoutAccountName,
+  formatPayoutMsisdnForGateway,
+  payoutMsisdnCandidatesForXentripay,
+} = require("../utils/payoutDetails");
 
 const mailerBoolean = (value, fallback = true) => {
   if (value === undefined || value === null || value === "") return fallback;
@@ -206,24 +211,26 @@ const initiatePayout = async ({
     throw error;
   }
 
-  const payload = {
+  const normalizedName = normalizePayoutAccountName(name);
+  const msisdnCandidates = payoutMsisdnCandidatesForXentripay(msisdn);
+  const basePayload = {
     customerReference,
     telecomProviderId: String(telecomProviderId),
-    msisdn: String(msisdn),
-    name,
+    name: normalizedName,
     transactionType: "PAYOUT",
     currency: config.currency,
     amount: wholeAmount,
   };
 
   if (isSimulation()) {
+    const simulatedMsisdn = formatPayoutMsisdnForGateway(msisdn);
     return {
       simulated: true,
       id: Date.now(),
       businessName: config.merchantName,
       customerReference,
-      telecomProviderId: payload.telecomProviderId,
-      msisdn: payload.msisdn,
+      telecomProviderId: basePayload.telecomProviderId,
+      msisdn: simulatedMsisdn,
       transactionType: "PAYOUT",
       currency: config.currency,
       amount: wholeAmount,
@@ -231,12 +238,26 @@ const initiatePayout = async ({
       status: "PENDING",
       statusMessage: "Simulated payout submitted. Confirm the merchant OTP in XentriPay to release funds.",
       internalRef: prefixedCode("PO", 12),
-      validatedAccountName: name,
+      validatedAccountName: normalizedName,
     };
   }
 
   requireLiveGatewayOrSimulate();
-  return xentripayRequest("POST", "/api/payment-requests", payload);
+  let lastError = null;
+  for (const candidateMsisdn of msisdnCandidates.length ? msisdnCandidates : [String(msisdn || "").trim()]) {
+    const payload = { ...basePayload, msisdn: candidateMsisdn };
+    try {
+      return await xentripayRequest("POST", "/api/payment-requests", payload);
+    } catch (error) {
+      lastError = error;
+      const retryable = /invalid fsp account/i.test(String(error.message || ""));
+      console.warn(
+        `XentriPay payout attempt failed for msisdn=${candidateMsisdn} name=${normalizedName} provider=${telecomProviderId}: ${error.message}`
+      );
+      if (!retryable) throw error;
+    }
+  }
+  throw lastError || new Error("XentriPay payout failed.");
 };
 
 const getPayoutStatus = async (customerReference) => {

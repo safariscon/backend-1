@@ -41,6 +41,7 @@ const { setDbReady } = require("./middleware/databaseMiddleware");
 const { getXentripayPublicStatus } = require("./services/xentripayService");
 const { runRebookExpiryCleanup } = require("./controllers/rebookController");
 const { runBookingNoActionRefundCleanup, runPendingPaymentSync, runReleasedProviderPayouts } = require("./controllers/bookingController");
+const { syncPendingPayouts } = require("./services/paymentSettlementService");
 const { runUnpaidBookingHoldCleanup } = require("./services/bookingHoldService");
 
 const PORT = process.env.PORT || 5000;
@@ -89,6 +90,14 @@ const startRebookExpiryCleanup = () => {
         await runReleasedProviderPayouts();
       } catch (payoutError) {
         console.warn("Held provider payout job failed:", payoutError.message);
+      }
+      try {
+        const payoutSync = await syncPendingPayouts();
+        if (payoutSync.successful || payoutSync.failed) {
+          console.info(`XentriPay payout sync: ${payoutSync.successful} successful, ${payoutSync.failed} failed, ${payoutSync.stillPending} pending`);
+        }
+      } catch (payoutSyncError) {
+        console.warn("Pending payout sync failed:", payoutSyncError.message);
       }
     } catch (error) {
       console.warn("Re-book cleanup failed:", error.message);

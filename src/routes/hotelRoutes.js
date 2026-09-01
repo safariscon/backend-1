@@ -24,7 +24,7 @@ const {
   deleteRoom,
   verifyMyBooking,
 } = require("../controllers/hotelController");
-const { getMyPayoutDetails, updateMyPayoutDetails, getSellerFinance } = require("../controllers/paymentController");
+const { getMyPayoutDetails, updateMyPayoutDetails, previewMyPayoutDetails, getSellerFinance } = require("../controllers/paymentController");
 const { uploadImages } = require("../controllers/uploadController");
 const { listPublicCategories, getPublicCategory } = require("../controllers/serviceCategoryController");
 const { protect, sellerOnly } = require("../middleware/authMiddleware");
@@ -35,6 +35,7 @@ const router = express.Router();
 router.get("/overview", protect, sellerOnly, getMyHotelOverview);
 router.get("/payout-details", protect, sellerOnly, getMyPayoutDetails);
 router.put("/payout-details", protect, sellerOnly, updateMyPayoutDetails);
+router.post("/payout-details/preview", protect, sellerOnly, previewMyPayoutDetails);
 router.get("/finance", protect, sellerOnly, getSellerFinance);
 router.get("/bookings", protect, sellerOnly, listMyBookings);
 router.post("/bookings/verify-code", protect, sellerOnly, verifyBookingCodeForCompletion);

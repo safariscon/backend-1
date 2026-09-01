@@ -43,7 +43,7 @@ const { protect, adminOnly } = require("../middleware/authMiddleware");
 const { imageUpload } = require("../middleware/uploadMiddleware");
 const { getMongoStorage, getCloudinaryStorage, getStorageOverview } = require("../controllers/storageController");
 const { getAnalyticsOverview, getAnalyticsServices, getAnalyticsPayments } = require("../controllers/analyticsController");
-const { listPayouts, syncPayout, getAdminFinance } = require("../controllers/paymentController");
+const { listPayouts, syncPayout, triggerPayout, triggerAllEligiblePayouts, getAdminFinance } = require("../controllers/paymentController");
 const {
   listAdminCategories,
   getAdminCategory,
@@ -103,6 +103,8 @@ router.delete("/businesses/:businessId", deleteBusiness);
 router.get("/transactions", listTransactions);
 router.get("/finance", getAdminFinance);
 router.get("/payouts", listPayouts);
+router.post("/payouts/trigger-all", triggerAllEligiblePayouts);
+router.post("/payouts/:transactionId/trigger", triggerPayout);
 router.post("/payouts/:transactionId/sync", syncPayout);
 router.put("/transactions/:transactionId/commission", updateCommissionStatus);
 router.get("/marketplace/overview", getMarketplaceOverview);

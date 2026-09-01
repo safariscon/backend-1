@@ -105,7 +105,7 @@ const hotelSchema = new mongoose.Schema(
       lowercase: true,
     },
     paymentPolicy: {
-      depositPercentage: { type: Number, default: 50, min: 0, max: 100 },
+      depositPercentage: { type: Number, default: 50, min: 20, max: 100 },
       remainingPaymentMethod: {
         type: String,
         enum: ["PAY_AT_ARRIVAL", "PAY_AT_CHECKOUT", "PAY_AT_BOOKING"],

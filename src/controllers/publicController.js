@@ -318,7 +318,6 @@ const getMarketplaceSettings = async (_req, res) => {
     const value = setting?.value || {};
     return res.json({
       settings: {
-        depositPercentage: 30,
         bookingMode: ["manual", "automatic", "service-level"].includes(value.bookingMode) ? value.bookingMode : "manual",
         defaultCommissionPercentage: Math.max(0, Math.min(100, Number(value.defaultCommissionPercentage) || 10)),
         bookingRules: Array.isArray(value.bookingRules)

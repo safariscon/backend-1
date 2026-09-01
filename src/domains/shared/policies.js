@@ -1,6 +1,7 @@
 const { asInteger, asBoolean, cleanText } = require("./helpers");
 
 const DEFAULT_DEPOSIT_PERCENT = 50;
+const MIN_DEPOSIT_PERCENT = 20;
 const DEFAULT_COMMISSION_PERCENT = 10;
 const REMAINING_PAYMENT_METHODS = ["PAY_AT_ARRIVAL", "PAY_AT_CHECKOUT", "PAY_AT_BOOKING"];
 const CANCELLATION_TYPES = ["flexible", "moderate", "strict", "custom"];
@@ -19,11 +20,14 @@ const remainingPaymentDuePhrase = (method, listing = {}) => {
   return "on arrival";
 };
 
-const clampPercent = (value, fallback) => {
+const clampPercent = (value, fallback, { min = 0, max = 100 } = {}) => {
   const parsed = asInteger(value);
   if (!Number.isFinite(parsed)) return fallback;
-  return Math.max(0, Math.min(100, parsed));
+  return Math.max(min, Math.min(max, parsed));
 };
+
+const clampDepositPercent = (value, fallback = DEFAULT_DEPOSIT_PERCENT) =>
+  clampPercent(value, fallback, { min: MIN_DEPOSIT_PERCENT, max: 100 });
 
 const normalizePaymentPolicy = (input = {}, fallback = {}) => {
   const remainingPaymentMethod = REMAINING_PAYMENT_METHODS.includes(input.remainingPaymentMethod)
@@ -31,7 +35,7 @@ const normalizePaymentPolicy = (input = {}, fallback = {}) => {
     : fallback.remainingPaymentMethod || "PAY_AT_ARRIVAL";
 
   return {
-    depositPercentage: clampPercent(input.depositPercentage ?? fallback.depositPercentage, DEFAULT_DEPOSIT_PERCENT),
+    depositPercentage: clampDepositPercent(input.depositPercentage ?? fallback.depositPercentage, DEFAULT_DEPOSIT_PERCENT),
     remainingPaymentMethod,
     currency: cleanText(input.currency || fallback.currency || "RWF", 8).toUpperCase() || "RWF",
   };
@@ -55,7 +59,7 @@ const normalizeCancellationPolicy = (input = {}, fallback = {}) => {
 
 const splitBookingAmounts = ({ totalPrice, depositPercentage, commissionPercentage }) => {
   const total = Math.max(0, Math.round(Number(totalPrice || 0)));
-  const depositPercent = clampPercent(depositPercentage, DEFAULT_DEPOSIT_PERCENT);
+  const depositPercent = clampDepositPercent(depositPercentage, DEFAULT_DEPOSIT_PERCENT);
   const commissionPercent = clampPercent(commissionPercentage, DEFAULT_COMMISSION_PERCENT);
   const depositAmount = Math.round((total * depositPercent) / 100);
   const remainingAmount = Math.max(0, total - depositAmount);
@@ -81,9 +85,25 @@ const policyFromListing = (listing = {}, defaults = {}) => ({
   ),
 });
 
+const resolveBookingMoney = (listing = {}, { totalPrice, commissionPercentage } = {}) => {
+  const policies = policyFromListing(listing);
+  const money = splitBookingAmounts({
+    totalPrice,
+    depositPercentage: policies.payment.depositPercentage,
+    commissionPercentage,
+  });
+  return {
+    ...money,
+    remainingPaymentMethod: policies.payment.remainingPaymentMethod,
+  };
+};
+
 module.exports = {
   DEFAULT_DEPOSIT_PERCENT,
+  MIN_DEPOSIT_PERCENT,
   DEFAULT_COMMISSION_PERCENT,
+  clampDepositPercent,
+  resolveBookingMoney,
   REMAINING_PAYMENT_METHODS,
   CANCELLATION_TYPES,
   normalizePaymentPolicy,

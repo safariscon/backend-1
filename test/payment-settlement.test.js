@@ -14,11 +14,23 @@ test("platform commission rate 0.12 becomes 12 percent", () => {
   assert.equal(resolveCommissionPercentage({ commissionPercentage: 8 }), 8);
 });
 
-test("collected amount is split into platform commission and provider payout", () => {
-  const split = splitCollectedAmount(30000, 12);
-  assert.equal(split.collectedAmount, 30000);
-  assert.equal(split.platformAmount, 3600);
-  assert.equal(split.providerAmount, 26400);
+test("collected amount is split using commission on full booking price", () => {
+  const full = splitCollectedAmount(30000, 12, 30000);
+  assert.equal(full.collectedAmount, 30000);
+  assert.equal(full.commissionDue, 3600);
+  assert.equal(full.platformAmount, 3600);
+  assert.equal(full.providerAmount, 26400);
+
+  const deposit = splitCollectedAmount(15000, 10, 30000);
+  assert.equal(deposit.collectedAmount, 15000);
+  assert.equal(deposit.commissionDue, 3000);
+  assert.equal(deposit.platformAmount, 3000);
+  assert.equal(deposit.providerAmount, 12000);
+
+  const small = splitCollectedAmount(120, 10, 1200);
+  assert.equal(small.commissionDue, 120);
+  assert.equal(small.platformAmount, 120);
+  assert.equal(small.providerAmount, 0);
 });
 
 test("service provider payout details accept momo and bank but reject card", () => {
@@ -71,6 +83,33 @@ test("customer collection details accept momo and card", () => {
   });
   assert.equal(card.ok, true);
   assert.equal(card.value.pmethod, "cc");
+});
+
+test("payout account helpers normalize names and msisdn for XentriPay", () => {
+  const {
+    normalizePayoutAccountName,
+    parseXentripayRegisteredName,
+    formatPayoutMsisdnForGateway,
+    payoutMsisdnCandidatesForXentripay,
+    formatPayoutFailureMessage,
+  } = require("../src/utils/payoutDetails");
+
+  assert.equal(normalizePayoutAccountName("  DUFITIMANA   Theoneste  "), "DUFITIMANA Theoneste");
+  assert.equal(
+    parseXentripayRegisteredName("Correct Registered name is : DUFITIMANA Theoneste"),
+    "DUFITIMANA Theoneste"
+  );
+  assert.equal(formatPayoutMsisdnForGateway("0793559258"), "0793559258");
+  assert.equal(formatPayoutMsisdnForGateway("250793559258"), "0793559258");
+  assert.deepEqual(payoutMsisdnCandidatesForXentripay("0793559258"), ["0793559258", "250793559258", "+250793559258"]);
+  assert.match(
+    formatPayoutFailureMessage({ message: "Invalid FSP Account" }, { recipientName: "DUFITIMANA Theoneste", msisdn: "0793559258" }),
+    /Invalid FSP Account/i
+  );
+  assert.doesNotMatch(
+    formatPayoutFailureMessage({ message: "Invalid FSP Account" }, { recipientName: "DUFITIMANA Theoneste", msisdn: "0793559258" }),
+    /not the wallet owner/i
+  );
 });
 
 test("placeholder XentriPay key stays in simulation mode", async () => {

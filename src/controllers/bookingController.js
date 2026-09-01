@@ -1459,8 +1459,7 @@ const finalizePaidBooking = async ({ booking, business, user, amount, method, pa
   transaction.collectionStatus = "success";
   transaction.commissionStatus = "collected";
   transaction.payoutStatus = "held";
-  transaction.payoutMessage =
-    "The deposit is held in the SafarisCon wallet until the cancellation window closes. Then the provider share is paid out automatically. Any remaining balance is collected later according to the listing payment policy.";
+  transaction.payoutMessage = "";
   if (typeof transaction.save === "function") await transaction.save();
 
   try {
@@ -2145,35 +2144,9 @@ const cancelBooking = async (req, res) => {
   }
 };
 
-const runReleasedProviderPayouts = async ({ now = new Date() } = {}) => {
-  const summary = { checked: 0, paidOut: 0, skipped: 0, failed: 0 };
-  const bookings = await Booking.find({
-    paymentStatus: { $in: DEPOSIT_PAID_STATUSES },
-    status: { $nin: ["cancelled", "completed", "rejected"] },
-    "cancellation.refundableUntil": { $lte: now },
-  }).limit(50);
-
-  for (const booking of bookings) {
-    summary.checked += 1;
-    const transaction = await findLatestTransaction(booking._id);
-    if (!transaction || transaction.status !== "paid") {
-      summary.skipped += 1;
-      continue;
-    }
-    if (!["held", "none", "failed"].includes(transaction.payoutStatus)) {
-      summary.skipped += 1;
-      continue;
-    }
-    const businessId = booking.hotelId || booking.preferredHotelId;
-    const business = businessId ? await Hotel.findById(businessId) : null;
-    try {
-      await startProviderPayout(transaction, business);
-      summary.paidOut += 1;
-    } catch (_error) {
-      summary.failed += 1;
-    }
-  }
-  return summary;
+const runReleasedProviderPayouts = async (options = {}) => {
+  const { processEligibleProviderPayouts } = require("../services/paymentSettlementService");
+  return processEligibleProviderPayouts(options);
 };
 
 const runBookingNoActionRefundCleanup = async () => ({ noActionRefunded: 0 });

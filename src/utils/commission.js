@@ -23,13 +23,21 @@ const resolveCommissionPercentage = (business) => {
 
 const roundRwf = (amount) => Math.max(0, Math.round(toFiniteNumber(amount, 0)));
 
-const splitCollectedAmount = (collectedAmount, commissionPercentage) => {
+const splitCollectedAmount = (collectedAmount, commissionPercentage, totalBookingPrice) => {
   const collected = roundRwf(collectedAmount);
   const percentage = Math.max(0, Math.min(100, toFiniteNumber(commissionPercentage, 0)));
-  const platformAmount = roundRwf((collected * percentage) / 100);
+  const totalBase = roundRwf(
+    Number.isFinite(Number(totalBookingPrice)) && Number(totalBookingPrice) > 0
+      ? totalBookingPrice
+      : collected
+  );
+  const commissionDue = roundRwf((totalBase * percentage) / 100);
+  const platformAmount = Math.min(commissionDue, collected);
   const providerAmount = Math.max(0, collected - platformAmount);
   return {
     collectedAmount: collected,
+    totalBookingPrice: totalBase,
+    commissionDue,
     commissionPercentage: percentage,
     platformAmount,
     providerAmount,

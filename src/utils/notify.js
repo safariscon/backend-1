@@ -525,6 +525,57 @@ const sendProviderPayoutEmail = async ({ serviceProviderEmail, serviceProviderNa
   });
 };
 
+const sendProviderPayoutSuccessEmail = async ({ serviceProviderEmail, serviceProviderName, businessName, amount, payoutReference, language, breakdown }) => {
+  const copy = emailCopy(language);
+  const greeting = greetingName(copy, serviceProviderName, "sellerHello");
+  const business = businessName || copy.yourService;
+  const lines = [
+    greeting,
+    fill(copy.payoutSuccessBody, { business }),
+    amount != null ? `${copy.payoutAmount}: ${formatRwfs(amount)}` : "",
+    payoutReference ? `${copy.payoutReference}: ${payoutReference}` : "",
+    breakdown?.customerPaid != null ? `Customer paid: ${formatRwfs(breakdown.customerPaid)}` : "",
+    breakdown?.platformCommission != null ? `SafarisCon commission (${breakdown.commissionPercentage || 10}%): ${formatRwfs(breakdown.platformCommission)}` : "",
+  ].filter(Boolean);
+  return sendMail({
+    to: serviceProviderEmail,
+    subject: copy.payoutSuccessSubject,
+    text: lines.join("\n\n"),
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;">
+        <h2 style="margin:0 0 16px;color:#111827;">${escapeHtml(copy.payoutSuccessTitle)}</h2>
+        ${paragraphHtml(lines)}
+      </div>
+    `,
+    simulationMessage: `Sent provider payout success email to ${serviceProviderEmail} for ${business}.`,
+  });
+};
+
+const sendProviderPayoutFailedEmail = async ({ serviceProviderEmail, serviceProviderName, businessName, amount, payoutReference, reason, language }) => {
+  const copy = emailCopy(language);
+  const greeting = greetingName(copy, serviceProviderName, "sellerHello");
+  const business = businessName || copy.yourService;
+  const lines = [
+    greeting,
+    fill(copy.payoutFailedBody, { business }),
+    amount != null ? `${copy.payoutAmount}: ${formatRwfs(amount)}` : "",
+    reason ? `${copy.payoutFailedReason}: ${reason}` : "",
+    payoutReference ? `${copy.payoutReference}: ${payoutReference}` : "",
+  ].filter(Boolean);
+  return sendMail({
+    to: serviceProviderEmail,
+    subject: copy.payoutFailedSubject,
+    text: lines.join("\n\n"),
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;">
+        <h2 style="margin:0 0 16px;color:#b91c1c;">${escapeHtml(copy.payoutFailedTitle)}</h2>
+        ${paragraphHtml(lines)}
+      </div>
+    `,
+    simulationMessage: `Sent provider payout failed email to ${serviceProviderEmail} for ${business}.`,
+  });
+};
+
 const sendBookingCodeEmail = async ({ customerEmail, customerName, businessName, bookingCode, language }) => {
   const copy = emailCopy(language);
   const greeting = greetingName(copy, customerName);
@@ -557,6 +608,8 @@ module.exports = {
   sendBookingPaidEmail,
   sendBookingCancelledEmail,
   sendProviderPayoutEmail,
+  sendProviderPayoutSuccessEmail,
+  sendProviderPayoutFailedEmail,
   sendBookingCodeEmail,
   isDeliverableEmail,
   resolveLanguage,

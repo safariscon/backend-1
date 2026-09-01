@@ -150,8 +150,8 @@ test("details unlock after successful 30% payment", async (context) => {
   assert.equal(result.body.booking.paymentStatus, "deposit_paid");
   assert.equal(result.body.booking.detailsUnlocked, true);
   assert.equal(result.body.booking.amountPaid, 30000);
-  assert.equal(result.body.split.platformAmount, 3600);
-  assert.equal(result.body.split.providerAmount, 26400);
+  assert.equal(result.body.split.platformAmount, 12000);
+  assert.equal(result.body.split.providerAmount, 18000);
   assert.equal(hasDepositPaid(result.body.booking), true);
 });
 
