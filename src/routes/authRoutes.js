@@ -20,6 +20,7 @@ const {
 } = require("../controllers/authController");
 const { protect, protectAllowWithoutTerms, optionalProtect, adminOnly } = require("../middleware/authMiddleware");
 const { imageUpload } = require("../middleware/uploadMiddleware");
+const { uploadCustomerDocuments } = require("../controllers/uploadController");
 
 const router = express.Router();
 
@@ -40,6 +41,8 @@ router.post("/accept-terms", protectAllowWithoutTerms, acceptTerms);
 router.post("/change-password", protect, changePassword);
 router.put("/profile", protect, updateProfile);
 router.post("/profile/avatar", protect, imageUpload.single("image"), uploadProfileAvatar);
+// Licence / permit photos a customer attaches to a vehicle booking.
+router.post("/documents", protect, imageUpload.array("documents", 2), uploadCustomerDocuments);
 router.post("/admin/register-business", protect, adminOnly, registerBusinessByAdmin);
 
 module.exports = router;

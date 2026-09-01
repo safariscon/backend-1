@@ -261,6 +261,16 @@ const notifyBookingCreated = async ({
     numberOfPeople: booking?.numberOfPeople,
     quantity: booking?.quantity,
     totalPrice: automaticQuote?.finalPrice || automaticQuote?.total || booking?.totalPrice || 0,
+    pickupLocation:
+      details.bookingAttributes?.pickupLocation
+      || details.bookingPayload?.pickupLocation
+      || details.pickupLocation
+      || "",
+    returnLocation:
+      details.bookingAttributes?.returnLocation
+      || details.bookingPayload?.returnLocation
+      || details.returnLocation
+      || "",
   };
 
   const sellerEmail = resolveSellerEmail(business);

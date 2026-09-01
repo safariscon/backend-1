@@ -12,6 +12,30 @@ const field = (id, label, type, extra = {}) => ({
   sortOrder: extra.sortOrder ?? 0,
 });
 
+const MOTORBIKE_CATEGORY_OPTIONS = [
+  { value: "scooter", label: "Scooter" },
+  { value: "taxi-moto", label: "Taxi-moto style" },
+  { value: "safari-adventure", label: "Safari / adventure" },
+];
+
+const MOTORBIKE_LICENCE_CLASS_OPTIONS = [
+  { value: "A1", label: "Class A1 — automatic scooters under 125cc" },
+  { value: "A", label: "Class A — manual motorbikes and taxi-motos over 125cc" },
+];
+
+const CAR_LICENCE_CLASS_OPTIONS = [
+  { value: "B", label: "Class B — light vehicles and cars" },
+  { value: "C", label: "Class C — trucks and heavy goods vehicles" },
+  { value: "D", label: "Class D — buses and minibuses" },
+  { value: "E", label: "Class E — vehicles with a trailer" },
+];
+
+const RWANDA_DISTRICT_OPTIONS = [
+  "Bugesera", "Burera", "Gakenke", "Gasabo", "Gatsibo", "Gicumbi", "Gisagara", "Huye", "Kamonyi", "Karongi",
+  "Kayonza", "Kicukiro", "Kirehe", "Muhanga", "Musanze", "Ngoma", "Ngororero", "Nyabihu", "Nyagatare", "Nyamagabe",
+  "Nyamasheke", "Nyanza", "Nyarugenge", "Nyaruguru", "Rubavu", "Ruhango", "Rulindo", "Rusizi", "Rutsiro", "Rwamagana",
+].map((district) => ({ value: district, label: district }));
+
 const DOMAIN_LABELS = {
   accommodation: "Accommodation",
   transport: "Transport",
@@ -196,6 +220,23 @@ const PLATFORM_CATEGORIES = [
       field("minRentalDays", "Minimum rental (days)", "number", { sortOrder: 10, validation: { min: 1 } }),
       field("maxRentalDays", "Maximum rental (days)", "number", { sortOrder: 11, validation: { min: 1 } }),
       field("depositNote", "Security deposit note", "textarea", { sortOrder: 12 }),
+      field("allowedLicenceClasses", "Permit classes you accept", "multiselect", {
+        required: true,
+        sortOrder: 13,
+        options: CAR_LICENCE_CLASS_OPTIONS,
+        helpText: "Customers must hold one of these classes to book.",
+      }),
+      field("pickupLocation", "Pickup location", "text", {
+        required: true,
+        sortOrder: 14,
+        helpText: "Where customers collect the vehicle. Shown on the listing and in booking emails.",
+      }),
+      field("returnLocation", "Return location", "text", {
+        required: true,
+        sortOrder: 15,
+        helpText: "Where customers return the vehicle.",
+      }),
+      field("requireLicenceUpload", "Require a photo of the permit at booking", "boolean", { sortOrder: 16 }),
     ],
     inventoryFields: [
       field("make", "Make", "text", { appliesTo: "option", sortOrder: 1 }),
@@ -206,18 +247,19 @@ const PLATFORM_CATEGORIES = [
       field("quantity", "Number of cars of this type", "number", { appliesTo: "option", sortOrder: 6, validation: { min: 1 } }),
     ],
     bookingFields: [
-      field("pickupLocation", "Pickup location", "text", { required: true, appliesTo: "booking", sortOrder: 1 }),
-      field("returnLocation", "Return location", "text", { required: true, appliesTo: "booking", sortOrder: 2 }),
-      field("pickupDateTime", "Pickup date", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 3 }),
-      field("returnDateTime", "Return date", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 4 }),
-      field("driverAge", "Driver age", "number", { required: true, appliesTo: "booking", sortOrder: 5, validation: { min: 18 } }),
+      field("pickupDateTime", "Pickup date", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 1 }),
+      field("returnDateTime", "Return date", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 2 }),
+      field("driverAge", "Driver age", "number", { required: true, appliesTo: "booking", sortOrder: 3, validation: { min: 18 } }),
       field("driverLicenseNumber", "Driver license number", "text", {
         required: true,
         appliesTo: "booking",
         visibility: "after_payment",
-        sortOrder: 6,
+        sortOrder: 4,
       }),
-      field("numberOfDrivers", "Number of drivers", "number", { required: true, appliesTo: "booking", sortOrder: 7, validation: { min: 1 } }),
+      field("numberOfDrivers", "Number of drivers", "number", { required: true, appliesTo: "booking", sortOrder: 5, validation: { min: 1 } }),
+      field("licenceClass", "Licence class", "select", { required: true, appliesTo: "booking", sortOrder: 6, options: CAR_LICENCE_CLASS_OPTIONS }),
+      field("licenceImageFront", "Licence photo (front)", "image", { required: true, appliesTo: "booking", sortOrder: 7, visibility: "private" }),
+      field("licenceImageBack", "Licence photo (back)", "image", { required: true, appliesTo: "booking", sortOrder: 8, visibility: "private" }),
     ],
   },
   {
@@ -292,14 +334,47 @@ const PLATFORM_CATEGORIES = [
     },
     listingFields: [
       field("helmetIncluded", "Helmet included", "boolean", { sortOrder: 1 }),
-      field("minimumDriverAge", "Minimum rider age", "number", { sortOrder: 2, validation: { min: 18 } }),
+      field("minimumDriverAge", "Minimum rider age", "number", { sortOrder: 2, validation: { min: 16 } }),
+      field("pickupTime", "Pickup from", "time", { sortOrder: 3 }),
+      field("returnTime", "Return by", "time", { sortOrder: 4 }),
+      field("minRentalDays", "Minimum rental (days)", "number", { sortOrder: 5, validation: { min: 1 } }),
+      field("maxRentalDays", "Maximum rental (days)", "number", { sortOrder: 6, validation: { min: 1 } }),
+      field("allowedLicenceClasses", "Permit classes you accept", "multiselect", {
+        required: true,
+        sortOrder: 7,
+        options: MOTORBIKE_LICENCE_CLASS_OPTIONS,
+        helpText: "Customers must hold one of these classes to book.",
+      }),
+      field("pickupLocation", "Pickup location", "text", {
+        required: true,
+        sortOrder: 8,
+        helpText: "Where customers collect the bike. Shown on the listing and in booking emails.",
+      }),
+      field("returnLocation", "Return location", "text", {
+        required: true,
+        sortOrder: 9,
+        helpText: "Where customers return the bike.",
+      }),
+      field("requireLicenceUpload", "Require a photo of the permit at booking", "boolean", { sortOrder: 10 }),
+      field("depositNote", "Security deposit note", "textarea", { sortOrder: 11 }),
     ],
-    inventoryFields: [],
+    inventoryFields: [
+      field("plateNumber", "Plate number", "text", { required: true, appliesTo: "option", sortOrder: 1, placeholder: "RE 100 A" }),
+      field("chassisNumber", "Chassis number (VIN)", "text", { appliesTo: "option", sortOrder: 2 }),
+      field("motoCategory", "Bike category", "select", { appliesTo: "option", sortOrder: 3, options: MOTORBIKE_CATEGORY_OPTIONS }),
+      field("engineCc", "Engine size (cc)", "number", { required: true, appliesTo: "option", sortOrder: 4, validation: { min: 30 } }),
+      field("insuranceExpiry", "Insurance expiry", "date", { required: true, appliesTo: "option", sortOrder: 5 }),
+      field("helmetsProvided", "Helmets provided", "number", { appliesTo: "option", sortOrder: 6, validation: { min: 0 } }),
+    ],
     bookingFields: [
-      field("pickupLocation", "Pickup location", "text", { required: true, appliesTo: "booking", sortOrder: 1 }),
-      field("returnLocation", "Return location", "text", { required: true, appliesTo: "booking", sortOrder: 2 }),
-      field("pickupDateTime", "Pickup date", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 3 }),
-      field("returnDateTime", "Return date", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 4 }),
+      field("selectedCategory", "Bike category", "select", { appliesTo: "booking", sortOrder: 1, options: MOTORBIKE_CATEGORY_OPTIONS }),
+      field("pickupDateTime", "Pickup date", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 2 }),
+      field("returnDateTime", "Return date", "datetime-local", { required: true, appliesTo: "booking", sortOrder: 3 }),
+      field("driverAge", "Rider age", "number", { required: true, appliesTo: "booking", sortOrder: 4, validation: { min: 16 } }),
+      field("driverLicenseNumber", "Driving licence number", "text", { required: true, appliesTo: "booking", sortOrder: 5 }),
+      field("licenceClass", "Licence class", "select", { required: true, appliesTo: "booking", sortOrder: 6, options: MOTORBIKE_LICENCE_CLASS_OPTIONS }),
+      field("licenceImageFront", "Licence photo (front)", "image", { required: true, appliesTo: "booking", sortOrder: 7, visibility: "private" }),
+      field("licenceImageBack", "Licence photo (back)", "image", { required: true, appliesTo: "booking", sortOrder: 8, visibility: "private" }),
     ],
   },
   {

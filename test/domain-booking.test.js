@@ -51,37 +51,131 @@ test("accommodation booking rejects inverted dates and over-capacity guests", ()
   assert.equal(passed.schedule.startDate, "2026-09-10");
 });
 
+const rentalListing = {
+  listingAttributes: {
+    minimumDriverAge: 21,
+    withDriver: false,
+    allowedLicenceClasses: ["B"],
+    pickupLocation: "Kigali airport",
+    returnLocation: "Musanze",
+  },
+};
+
 test("car rental booking enforces license, age, and return after pickup", () => {
   const failed = validateBookingDetails({
     categoryOrSlug: "car-rental",
     payload: {
-      pickupLocation: "Kigali airport",
-      returnLocation: "Kigali airport",
       pickupDateTime: "2026-09-10T10:00:00.000Z",
       returnDateTime: "2026-09-10T08:00:00.000Z",
       driverAge: 20,
       driverLicenseNumber: "RW123",
       numberOfDrivers: 1,
     },
-    listing: { listingAttributes: { minimumDriverAge: 21, withDriver: false } },
+    listing: rentalListing,
   });
   assert.equal(failed.ok, false);
 
   const passed = validateBookingDetails({
     categoryOrSlug: "car-rental",
     payload: {
-      pickupLocation: "Kigali airport",
-      returnLocation: "Musanze",
       pickupDateTime: "2026-09-10T10:00:00.000Z",
       returnDateTime: "2026-09-12T10:00:00.000Z",
       driverAge: 25,
       driverLicenseNumber: "RW123",
       numberOfDrivers: 1,
+      licenceClass: "B",
+      licenceImageFront: "https://cdn.example.com/licence-front.jpg",
+      licenceImageBack: "https://cdn.example.com/licence-back.jpg",
     },
-    listing: { listingAttributes: { minimumDriverAge: 21, withDriver: false } },
+    listing: rentalListing,
   });
   assert.equal(passed.ok, true);
   assert.equal(passed.domain, "transport");
+  assert.equal(passed.payload.licenceClass, "B");
+  assert.equal(passed.payload.pickupLocation, "Kigali airport");
+  assert.equal(passed.payload.returnLocation, "Musanze");
+});
+
+test("car rental booking rejects a licence class the provider does not accept", () => {
+  const rejected = validateBookingDetails({
+    categoryOrSlug: "car-rental",
+    payload: {
+      pickupDateTime: "2026-09-10T10:00:00.000Z",
+      returnDateTime: "2026-09-12T10:00:00.000Z",
+      driverAge: 25,
+      driverLicenseNumber: "RW123",
+      numberOfDrivers: 1,
+      licenceClass: "D",
+      licenceImageFront: "https://cdn.example.com/licence-front.jpg",
+      licenceImageBack: "https://cdn.example.com/licence-back.jpg",
+    },
+    listing: rentalListing,
+  });
+  assert.equal(rejected.ok, false);
+});
+
+test("motorbike booking matches the permit class to the engine size", () => {
+  const listing = {
+    listingAttributes: {
+      minimumDriverAge: 18,
+      allowedLicenceClasses: ["A1", "A"],
+      requireLicenceUpload: true,
+      pickupLocation: "Gasabo, Kigali",
+      returnLocation: "Gasabo, Kigali",
+    },
+  };
+  const payload = {
+    pickupDateTime: "2026-09-10T10:00:00.000Z",
+    returnDateTime: "2026-09-12T10:00:00.000Z",
+    driverAge: 24,
+    driverLicenseNumber: "RW999",
+    selectedCategory: "taxi-moto",
+    licenceImageFront: "https://cdn.example.com/licence-front.jpg",
+    licenceImageBack: "https://cdn.example.com/licence-back.jpg",
+  };
+  const inventory = { attributes: { engineCc: 150, insuranceExpiry: "2027-01-01" } };
+
+  const tooSmall = validateBookingDetails({
+    categoryOrSlug: "motorbike",
+    payload: { ...payload, licenceClass: "A1" },
+    listing,
+    inventory,
+  });
+  assert.equal(tooSmall.ok, false);
+
+  const passed = validateBookingDetails({
+    categoryOrSlug: "motorbike",
+    payload: { ...payload, licenceClass: "A" },
+    listing,
+    inventory,
+  });
+  assert.equal(passed.ok, true);
+  assert.equal(passed.payload.selectedCategory, "taxi-moto");
+});
+
+test("motorbike booking is blocked when insurance expires before the return date", () => {
+  const result = validateBookingDetails({
+    categoryOrSlug: "motorbike",
+    payload: {
+      pickupDateTime: "2026-09-10T10:00:00.000Z",
+      returnDateTime: "2026-09-12T10:00:00.000Z",
+      driverAge: 24,
+      driverLicenseNumber: "RW999",
+      licenceClass: "A1",
+      licenceImageFront: "https://cdn.example.com/licence-front.jpg",
+      licenceImageBack: "https://cdn.example.com/licence-back.jpg",
+    },
+    listing: {
+      listingAttributes: {
+        allowedLicenceClasses: ["A1"],
+        requireLicenceUpload: true,
+        pickupLocation: "Gasabo",
+        returnLocation: "Gasabo",
+      },
+    },
+    inventory: { attributes: { engineCc: 110, insuranceExpiry: "2026-09-11" } },
+  });
+  assert.equal(result.ok, false);
 });
 
 test("tour booking requires adults + children to match participants", () => {
@@ -148,15 +242,26 @@ test("car rental booking enforces max rental days", () => {
   const failed = validateBookingDetails({
     categoryOrSlug: "car-rental",
     payload: {
-      pickupLocation: "Kigali airport",
-      returnLocation: "Kigali airport",
       pickupDateTime: "2026-09-10T10:00:00.000Z",
       returnDateTime: "2026-09-20T10:00:00.000Z",
       driverAge: 25,
       driverLicenseNumber: "RW123",
       numberOfDrivers: 1,
+      licenceClass: "B",
+      licenceImageFront: "https://cdn.example.com/licence-front.jpg",
+      licenceImageBack: "https://cdn.example.com/licence-back.jpg",
     },
-    listing: { listingAttributes: { minimumDriverAge: 21, withDriver: false, minRentalDays: 1, maxRentalDays: 7 } },
+    listing: {
+      listingAttributes: {
+        minimumDriverAge: 21,
+        withDriver: false,
+        minRentalDays: 1,
+        maxRentalDays: 7,
+        allowedLicenceClasses: ["B"],
+        pickupLocation: "Kigali airport",
+        returnLocation: "Kigali airport",
+      },
+    },
   });
   assert.equal(failed.ok, false);
 });
