@@ -36,7 +36,7 @@ const {
   createBookingConsumption,
   markConsumptionPaidAndCaptureCapacity,
 } = require("../services/availabilityService");
-const { evaluateStayAvailability, isStayLike } = require("../services/occupancyService");
+const { evaluateStayAvailability, evaluateRentalAvailability, isStayLike, isAccommodationStay, isTransportRental } = require("../services/occupancyService");
 const {
   releaseBookingHold,
   expireUnpaidBookingHold,
@@ -752,6 +752,8 @@ const createBookingRequest = async (req, res) => {
       endDate: domainBooking?.schedule?.endDate || normalizedEndBookingDateValue,
       startTime: domainBooking?.schedule?.startTime || normalizedStartTime,
       endTime: domainBooking?.schedule?.endTime || normalizedEndTime,
+      domain: domainBooking?.domain,
+      subtype: domainBooking?.subtype,
     });
     if (!schedule.ok) {
       return res.status(schedule.status).json({ message: schedule.message });
@@ -767,30 +769,55 @@ const createBookingRequest = async (req, res) => {
       details.requestedService = selectedOption.name || details.requestedService;
       details.listedPriceRwf = Number(selectedOption.price || details.listedPriceRwf || 0);
     }
-    const stayLikeBooking = Boolean(
+    const accommodationStay = Boolean(
       selectedBusiness
-      && isStayLike({
+      && isAccommodationStay({
         listing: selectedBusiness,
         option: selectedOption,
         domain: domainBooking?.domain,
       })
     );
-    if (stayLikeBooking) {
+    const transportRental = Boolean(
+      selectedBusiness
+      && isTransportRental({
+        listing: selectedBusiness,
+        option: selectedOption,
+        domain: domainBooking?.domain,
+        subtype: domainBooking?.subtype,
+      })
+    );
+    const stayLikeBooking = accommodationStay || transportRental;
+    if (accommodationStay || transportRental) {
       const stayAvailability = await findAvailability({
         serviceId: selectedBusiness._id,
         optionId: selectedOption?.id && /^[a-f\d]{24}$/i.test(String(selectedOption.id)) ? selectedOption.id : null,
       });
-      const stayCheck = await evaluateStayAvailability({
-        listing: selectedBusiness,
-        option: selectedOption,
-        availability: stayAvailability,
-        checkIn: schedule.startDate,
-        checkOut: schedule.endDate,
-        units: totalConsumptionUnits,
-        domain: domainBooking?.domain,
-      });
-      if (!stayCheck.ok) {
-        return res.status(409).json({ message: stayCheck.message, code: "STAY_UNAVAILABLE" });
+      if (accommodationStay) {
+        const stayCheck = await evaluateStayAvailability({
+          listing: selectedBusiness,
+          option: selectedOption,
+          availability: stayAvailability,
+          checkIn: schedule.startDate,
+          checkOut: schedule.endDate,
+          units: totalConsumptionUnits,
+          domain: domainBooking?.domain,
+        });
+        if (!stayCheck.ok) {
+          return res.status(409).json({ message: stayCheck.message, code: "STAY_UNAVAILABLE" });
+        }
+      }
+      if (transportRental) {
+        const rentalCheck = await evaluateRentalAvailability({
+          listing: selectedBusiness,
+          option: selectedOption,
+          availability: stayAvailability,
+          startDate: schedule.startDate,
+          endDate: schedule.endDate,
+          units: totalConsumptionUnits,
+        });
+        if (!rentalCheck.ok) {
+          return res.status(409).json({ message: rentalCheck.message, code: "RENTAL_UNAVAILABLE" });
+        }
       }
     }
     const normalizedBookingDate = new Date(`${schedule.startDate}T12:00:00Z`);
@@ -1078,8 +1105,12 @@ const createBookingRequest = async (req, res) => {
       destinationLocation: resolvedDestinationLocation,
       preferredHotelId,
       hotelId: effectiveMode === "automatic" ? preferredHotelId : null,
-      checkIn: domainBooking?.payload?.checkIn || checkIn || normalizedBookingDateFinal,
-      checkOut: domainBooking?.payload?.checkOut || checkOut || normalizedEndBookingDate,
+      checkIn: domainBooking?.domain === "accommodation"
+        ? (domainBooking?.payload?.checkIn || checkIn || normalizedBookingDateFinal)
+        : null,
+      checkOut: domainBooking?.domain === "accommodation"
+        ? (domainBooking?.payload?.checkOut || checkOut || normalizedEndBookingDate)
+        : null,
       bookingDate: normalizedBookingDateFinal,
       endBookingDate: normalizedEndBookingDate,
       startTime: builtConsumption.consumption.consumptionStartTime || schedule.startTime,

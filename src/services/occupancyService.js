@@ -49,21 +49,33 @@ const eachNight = (checkIn, checkOut) => {
 const optionQuantity = (option = {}) =>
   Math.max(1, Math.floor(Number(option.attributes?.quantity || option.capacity || option.quantity || 1) || 1));
 
-const isStayLike = ({ listing = {}, option = {}, domain } = {}) => {
+const isTransportRental = ({ listing = {}, option = {}, domain, subtype } = {}) => {
+  const resolvedSubtype = String(subtype || listing.subtype || "").toLowerCase();
+  if (resolvedSubtype === "taxi") return false;
+  const resolvedDomain = domain || listing.domain || "";
+  const slug = String(listing.categorySlug || listing.type || listing.subtype || resolvedSubtype || "").toLowerCase();
+  if (resolvedDomain === "transport") {
+    return /(car-rental|car-rentals|^cars$|motorbike)/.test(slug)
+      || resolvedSubtype === "car-rental"
+      || resolvedSubtype === "motorbike";
+  }
+  return /(car-rental|car-rentals|^cars$|motorbike|motorbike-and-scooter-rentals)/.test(slug);
+};
+
+const isAccommodationStay = ({ listing = {}, option = {}, domain } = {}) => {
+  if (isTransportRental({ listing, option, domain })) return false;
   if (domain === "accommodation") return true;
   if (listing.domain === "accommodation") return true;
   const slug = String(listing.categorySlug || listing.type || listing.subtype || "").toLowerCase();
   if (/(hotel|apartment|homestay|guest-house|hostel|villa|lodge)/.test(slug)) return true;
-  if (domain === "transport" || listing.domain === "transport") {
-    if (/(car-rental|car-rentals|^cars$|motorbike)/.test(slug)) return true;
-  }
-  if (/(car-rental|car-rentals)/.test(slug) || slug === "motorbike" || slug === "motorbike-and-scooter-rentals") {
-    return true;
-  }
   const unit = String(option.durationUnit || "").toLowerCase();
   const priceType = String(option.priceType || "").toLowerCase();
   return unit === "nights" || priceType === "per-night";
 };
+
+const isStayLike = ({ listing = {}, option = {}, domain, subtype } = {}) =>
+  isAccommodationStay({ listing, option, domain })
+  || isTransportRental({ listing, option, domain, subtype });
 
 const rangeOverlapsStay = (itemStart, itemEnd, checkIn, checkOut) => {
   const start = normalizeIsoDate(itemStart);
@@ -165,6 +177,50 @@ const loadStayOccupancyForServices = async (serviceIds = []) => {
   return { consumptionsByOption, blocksByOption };
 };
 
+const evaluateRentalAvailability = async ({
+  listing = {},
+  option = {},
+  availability = null,
+  startDate,
+  endDate,
+  units = 1,
+} = {}) => {
+  const start = normalizeIsoDate(startDate);
+  const end = normalizeIsoDate(endDate);
+  if (!start || !end || end <= start) {
+    return { ok: false, remaining: 0, message: "Return date must be after pickup date." };
+  }
+  const window = windowAllowsStay(availability, start, end);
+  if (!window.ok) return { ok: false, remaining: 0, message: window.message };
+
+  const optionId = option.id || option._id || option.optionId || null;
+  const occupancy = await loadStayOccupancy({
+    serviceId: listing._id || listing.id,
+    optionId: optionId && /^[a-f\d]{24}$/i.test(String(optionId)) ? optionId : null,
+  });
+  const quantity = optionQuantity(option);
+  const remaining = remainingForStay({
+    quantity,
+    consumptions: occupancy.consumptions,
+    blocks: occupancy.blocks,
+    checkIn: start,
+    checkOut: end,
+  });
+  const needed = Math.max(1, Math.floor(Number(units) || 1));
+  if (remaining < needed) {
+    return {
+      ok: false,
+      remaining,
+      quantity,
+      message:
+        remaining <= 0
+          ? "No vehicles are available for those dates. Choose other dates."
+          : `Only ${remaining} available for those dates.`,
+    };
+  }
+  return { ok: true, remaining, quantity };
+};
+
 const evaluateStayAvailability = async ({
   listing = {},
   option = {},
@@ -235,11 +291,14 @@ module.exports = {
   occupancyKey,
   optionQuantity,
   isStayLike,
+  isAccommodationStay,
+  isTransportRental,
   rangeOverlapsStay,
   remainingForStay,
   windowAllowsStay,
   loadStayOccupancy,
   loadStayOccupancyForServices,
   evaluateStayAvailability,
+  evaluateRentalAvailability,
   serializeBlock,
 };

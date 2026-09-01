@@ -274,13 +274,15 @@ const weekdayMessage = (isoDate, option) => {
   return `This option is not available on ${day}. Available days: ${allowed}.`;
 };
 
-const validateBookingSchedule = ({ option, startDate, endDate, startTime, endTime } = {}) => {
+const validateBookingSchedule = ({ option, startDate, endDate, startTime, endTime, domain, subtype } = {}) => {
   const resolvedStart = normalizeIsoDate(startDate);
   if (!resolvedStart) {
     return failSchedule("Booking date is required.");
   }
 
-  const needsEndDate = optionRequiresEndDate(option);
+  const needsEndDate =
+    (domain === "transport" && subtype !== "taxi")
+    || optionRequiresEndDate(option);
   let resolvedEnd = normalizeIsoDate(endDate);
   if (resolvedEnd && resolvedEnd < resolvedStart) {
     return failSchedule("End booking date cannot be before booking date.");

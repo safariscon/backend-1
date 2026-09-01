@@ -483,6 +483,41 @@ test("older listings without hours keep dates required and times optional", () =
   assert.equal(allDay.endTime, "");
 });
 
+test("transport rental schedule keeps return date even when option has no duration unit", () => {
+  const option = normalizePriceOption({
+    id: "moto-1",
+    cells: {
+      service: "Crypton 125",
+      price: 15000,
+      priceType: "fixed",
+      calculationField: "quantity",
+      durationUnit: "",
+      availability: 2,
+    },
+  });
+  const collapsed = validateBookingSchedule({
+    option,
+    startDate: "2026-09-02",
+    endDate: "2026-09-03",
+    startTime: "08:00",
+    endTime: "18:00",
+  });
+  assert.equal(collapsed.endDate, collapsed.startDate);
+
+  const rental = validateBookingSchedule({
+    option,
+    startDate: "2026-09-02",
+    endDate: "2026-09-03",
+    startTime: "08:00",
+    endTime: "18:00",
+    domain: "transport",
+    subtype: "motorbike",
+  });
+  assert.equal(rental.ok, true);
+  assert.equal(rental.startDate, "2026-09-02");
+  assert.equal(rental.endDate, "2026-09-03");
+});
+
 test("booking schedule rejects dates outside the published window and unavailable weekdays", () => {
   const option = normalizePriceOption({
     id: "windowed",
