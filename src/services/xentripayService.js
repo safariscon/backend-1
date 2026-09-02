@@ -10,6 +10,58 @@ const mailerBoolean = (value, fallback = true) => {
   return !["false", "0", "no"].includes(String(value).trim().toLowerCase());
 };
 
+/**
+ * When true (default), the customer MoMo/card prompt equals the deposit amount we send.
+ * XentriPay deducts gateway fees from the merchant wallet settlement (~3% on collections).
+ * Set XENTRIPAY_PASS_FEES_TO_CUSTOMER=true only if you intentionally surcharge the customer.
+ * Legacy: XENTRIPAY_CHARGES_INCLUDED=false also passes fees to the customer.
+ */
+const customerPaysExactCollectionAmount = () => {
+  if (process.env.XENTRIPAY_PASS_FEES_TO_CUSTOMER !== undefined && process.env.XENTRIPAY_PASS_FEES_TO_CUSTOMER !== "") {
+    return !mailerBoolean(process.env.XENTRIPAY_PASS_FEES_TO_CUSTOMER, false);
+  }
+  return mailerBoolean(process.env.XENTRIPAY_CHARGES_INCLUDED, true);
+};
+
+const buildCollectionInitiatePayload = ({
+  email,
+  cname,
+  amount,
+  cnumber,
+  msisdn,
+  currency,
+  pmethod,
+  customerRef,
+  details,
+  redirecturl,
+  returl,
+  collectionRedirectUrl,
+  collectionReturnUrl,
+}) => {
+  const wholeAmount = Math.round(Number(amount || 0));
+  const chargesIncluded = customerPaysExactCollectionAmount();
+  const payload = {
+    email,
+    cname,
+    amount: wholeAmount,
+    cnumber: String(cnumber || "").trim(),
+    msisdn: String(msisdn || "").trim(),
+    currency,
+    pmethod,
+    // XentriPay expects a boolean; true = customer pays `amount` exactly, merchant absorbs gateway fees.
+    chargesIncluded,
+  };
+  if (customerRef) payload.customerRef = customerRef;
+  if (details) payload.details = details;
+
+  if (pmethod === "cc") {
+    payload.redirecturl = redirecturl || collectionRedirectUrl;
+    payload.returl = returl || collectionReturnUrl;
+  }
+
+  return { payload, wholeAmount, chargesIncluded };
+};
+
 const sanitizeApiKey = (value) =>
   String(value || "")
     .replace(/^\uFEFF/, "")
@@ -31,7 +83,8 @@ const getXentripayConfig = () => {
     apiKey,
     baseUrl,
     currency: String(process.env.XENTRIPAY_CURRENCY || "RWF").trim().toUpperCase() || "RWF",
-    chargesIncluded: mailerBoolean(process.env.XENTRIPAY_CHARGES_INCLUDED, true),
+    chargesIncluded: customerPaysExactCollectionAmount(),
+    customerPaysExactAmount: customerPaysExactCollectionAmount(),
     minAmount: Number(process.env.XENTRIPAY_MIN_AMOUNT || 100),
     merchantName: String(process.env.XENTRIPAY_MERCHANT_NAME || "SafarisCon").trim(),
     merchantEmail: String(process.env.XENTRIPAY_MERCHANT_EMAIL || "").trim(),
@@ -117,7 +170,7 @@ const xentripayRequest = async (method, path, body) => {
   return payload;
 };
 
-const simulateCollection = ({ customerRef, pmethod, amount }) => ({
+const simulateCollection = ({ customerRef, pmethod, amount, chargesIncluded = true }) => ({
   simulated: true,
   reply: "Simulated XentriPay collection initiated.",
   url: pmethod === "cc" ? `https://sandbox.xentripay.local/card/${customerRef}` : null,
@@ -128,6 +181,7 @@ const simulateCollection = ({ customerRef, pmethod, amount }) => ({
   retcode: 0,
   customerRef,
   amount,
+  chargesIncluded,
 });
 
 const initiateCollection = async ({
@@ -143,41 +197,42 @@ const initiateCollection = async ({
   returl,
 }) => {
   const config = getXentripayConfig();
-  const wholeAmount = Math.round(Number(amount || 0));
+  const { payload, wholeAmount, chargesIncluded } = buildCollectionInitiatePayload({
+    email,
+    cname,
+    amount,
+    cnumber,
+    msisdn,
+    currency: config.currency,
+    pmethod,
+    customerRef,
+    details,
+    redirecturl,
+    returl,
+    collectionRedirectUrl: config.collectionRedirectUrl,
+    collectionReturnUrl: config.collectionReturnUrl,
+  });
+
   if (!Number.isFinite(wholeAmount) || wholeAmount < config.minAmount) {
     const error = new Error(`Amount must be at least ${config.minAmount} ${config.currency}.`);
     error.status = 400;
     throw error;
   }
 
-  const payload = {
-    email,
-    cname,
-    amount: wholeAmount,
-    cnumber: String(cnumber || "").trim(),
-    msisdn: String(msisdn || "").trim(),
-    currency: config.currency,
-    pmethod,
-    chargesIncluded: config.chargesIncluded,
-  };
-  if (customerRef) payload.customerRef = customerRef;
-  if (details) payload.details = details;
-
-  if (pmethod === "cc") {
-    payload.redirecturl = redirecturl || config.collectionRedirectUrl;
-    payload.returl = returl || config.collectionReturnUrl;
-    if (!payload.redirecturl || !payload.returl) {
-      const error = new Error("Card collections require redirect and return URLs.");
-      error.status = 400;
-      throw error;
-    }
+  if (pmethod === "cc" && (!payload.redirecturl || !payload.returl)) {
+    const error = new Error("Card collections require redirect and return URLs.");
+    error.status = 400;
+    throw error;
   }
 
   if (isSimulation()) {
-    return simulateCollection({ customerRef, pmethod, amount: wholeAmount });
+    return simulateCollection({ customerRef, pmethod, amount: wholeAmount, chargesIncluded });
   }
 
   requireLiveGatewayOrSimulate();
+  console.info(
+    `XentriPay collection initiate amount=${wholeAmount} chargesIncluded=${chargesIncluded} pmethod=${pmethod} customerRef=${customerRef || ""}`
+  );
   return xentripayRequest("POST", "/api/collections/initiate", payload);
 };
 
@@ -379,6 +434,8 @@ module.exports = {
   getXentripayConfig,
   getXentripayPublicStatus,
   isSimulation,
+  buildCollectionInitiatePayload,
+  customerPaysExactCollectionAmount,
   initiateCollection,
   getCollectionStatus,
   initiatePayout,

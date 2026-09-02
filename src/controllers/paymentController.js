@@ -86,15 +86,20 @@ const listPaymentCatalog = (_req, res) => {
     configured: config.configured,
     environment: config.env,
     platformCommissionPercentage: getPlatformCommissionPercentage(),
+    collectionPolicy: {
+      customerPaysExactDeposit: config.customerPaysExactAmount,
+      merchantAbsorbsGatewayFees: config.customerPaysExactAmount,
+      chargesIncluded: config.chargesIncluded,
+    },
     collectionMethods: COLLECTION_METHODS,
     payoutMethods: PAYOUT_METHODS,
     mobileMoneyProviders: MOBILE_MONEY_PROVIDERS,
     bankProviders: BANK_PROVIDERS,
     notes: {
       collections:
-        "Customers pay SafarisCon through XentriPay. Card and Mobile Money are supported for collections.",
+        "Customers pay the online deposit shown in the app. The MoMo/card prompt matches that deposit amount; SafarisCon absorbs XentriPay collection fees from the merchant wallet. Platform commission (default 10% of full listing price) is taken from the deposit collected.",
       payouts:
-        "Customer pays 100% into the SafarisCon XentriPay wallet. Money stays there until the cancellation window closes. Then SafarisCon keeps commission and pays the provider. If the customer cancels in time, they lose the agreed penalty percent; that fee is split at half the usual commission rate.",
+        "After the cancel window, SafarisCon pays the provider their share of the deposit. Payout gateway fees are borne by SafarisCon for now.",
     },
   });
 };

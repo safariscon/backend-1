@@ -7,7 +7,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { normalizePayoutDetails, normalizeCustomerPaymentDetails } = require("../src/utils/payoutDetails");
 const { splitCollectedAmount, getPlatformCommissionPercentage, resolveCommissionPercentage } = require("../src/utils/commission");
-const { getXentripayConfig, initiateCollection, initiatePayout, toClientPaymentError } = require("../src/services/xentripayService");
+const { getXentripayConfig, initiateCollection, initiatePayout, toClientPaymentError, buildCollectionInitiatePayload, customerPaysExactCollectionAmount } = require("../src/services/xentripayService");
 
 test("platform commission rate 0.12 becomes 12 percent", () => {
   assert.equal(getPlatformCommissionPercentage(), 12);
@@ -110,6 +110,43 @@ test("payout account helpers normalize names and msisdn for XentriPay", () => {
     formatPayoutFailureMessage({ message: "Invalid FSP Account" }, { recipientName: "DUFITIMANA Theoneste", msisdn: "0793559258" }),
     /not the wallet owner/i
   );
+});
+
+test("collected amount split matches deposit model (1000 deposit on 2000 listing)", () => {
+  const split = splitCollectedAmount(1000, 10, 2000);
+  assert.equal(split.platformAmount, 200);
+  assert.equal(split.providerAmount, 800);
+});
+
+test("collection payload keeps gateway fees on merchant (chargesIncluded true)", () => {
+  const previousPassFees = process.env.XENTRIPAY_PASS_FEES_TO_CUSTOMER;
+  const previousIncluded = process.env.XENTRIPAY_CHARGES_INCLUDED;
+  process.env.XENTRIPAY_PASS_FEES_TO_CUSTOMER = "false";
+  process.env.XENTRIPAY_CHARGES_INCLUDED = "true";
+  try {
+    assert.equal(customerPaysExactCollectionAmount(), true);
+    const { payload, wholeAmount, chargesIncluded } = buildCollectionInitiatePayload({
+      email: "guest@example.com",
+      cname: "Guest",
+      amount: 1000,
+      cnumber: "0780371519",
+      msisdn: "250780371519",
+      currency: "RWF",
+      pmethod: "momo",
+      customerRef: "PAY-1000",
+      details: "test",
+      collectionRedirectUrl: "",
+      collectionReturnUrl: "",
+    });
+    assert.equal(wholeAmount, 1000);
+    assert.equal(chargesIncluded, true);
+    assert.equal(payload.amount, 1000);
+    assert.equal(payload.chargesIncluded, true);
+    assert.equal(payload.pmethod, "momo");
+  } finally {
+    process.env.XENTRIPAY_PASS_FEES_TO_CUSTOMER = previousPassFees;
+    process.env.XENTRIPAY_CHARGES_INCLUDED = previousIncluded;
+  }
 });
 
 test("placeholder XentriPay key stays in simulation mode", async () => {
