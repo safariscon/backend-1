@@ -1332,6 +1332,43 @@ const uploadProfileAvatar = async (req, res) => {
   }
 };
 
+const getAccountDeletionStatus = async (req, res) => {
+  try {
+    const { getAccountDeletionStatus: evaluate } = require("../services/accountDeletionService");
+    const status = await evaluate(req.user);
+    return res.json(status);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to check account deletion status.", error: error.message });
+  }
+};
+
+const deleteMyAccount = async (req, res) => {
+  try {
+    const confirm = String(req.body?.confirm || "").trim().toUpperCase();
+    if (confirm !== "DELETE") {
+      return res.status(400).json({
+        message: 'Type DELETE to confirm permanent account deletion.',
+        code: "CONFIRMATION_REQUIRED",
+      });
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ message: "User not found." });
+
+    const { deleteAccountForUser } = require("../services/accountDeletionService");
+    const result = await deleteAccountForUser(user);
+    return res.json(result);
+  } catch (error) {
+    const status = error.status || 500;
+    return res.status(status).json({
+      message: error.message || "Failed to delete account.",
+      code: error.code || "DELETE_FAILED",
+      details: error.details || undefined,
+      error: status >= 500 ? error.message : undefined,
+    });
+  }
+};
+
 module.exports = {
   login,
   resendLoginOtp,
@@ -1350,4 +1387,6 @@ module.exports = {
   acceptTerms,
   updateProfile,
   uploadProfileAvatar,
+  getAccountDeletionStatus,
+  deleteMyAccount,
 };
